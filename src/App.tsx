@@ -1,285 +1,476 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Mic, Square, Trash2 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { useRef, useState, type ReactNode } from "react";
+import {
+  analyze,
+  FIX_HORIZON_DAYS,
+  formatDuration,
+  formatMoney,
+  formatRate,
+  formatVolume,
+  LITERS_PER_GAL,
+  litersPerDay,
+  PERIODS,
+  type Measurement,
+  type Source,
+  type Unit,
+} from "@/lib/drips";
+import { CAMERA_DETECTOR, CAMERA_ROI, cameraSampler, MIC_DETECTOR, micSampler } from "@/lib/samplers";
+import { useDropSession } from "@/lib/useDropSession";
 
-type Severity = "low" | "medium" | "high";
+type Mode = "idle" | "mic" | "camera" | "tap";
+type RepairKind = "diy" | "plumber";
 
-type ScanRecord = {
-  id: string;
-  created_at: string;
-  severity: Severity;
-  dominant_freq: number;
-  high_energy: number;
-  total_energy: number;
-  score: number;
-};
+const SOURCE_LABEL: Record<Source, string> = { mic: "sound", camera: "camera", tap: "taps" };
 
-const severityInfo: Record<Severity, { color: string; bg: string; desc: string }> = {
-  low: { color: "text-emerald-600", bg: "bg-emerald-50", desc: "minimal hiss. likely no active leak." },
-  medium: { color: "text-amber-600", bg: "bg-amber-50", desc: "steady hiss. a seal may be failing." },
-  high: { color: "text-red-600", bg: "bg-red-50", desc: "strong pressurized hiss. call a plumber." },
-};
-
-function scoreToSeverity(score: number): Severity {
-  if (score >= 0.55) return "high";
-  if (score >= 0.28) return "medium";
-  return "low";
+function errorText(e: unknown) {
+  if (e instanceof DOMException && e.name === "NotAllowedError") return "access was blocked";
+  if (e instanceof DOMException && e.name === "NotFoundError") return "no device found";
+  return e instanceof Error ? e.message.toLowerCase() : "something went wrong";
 }
 
-const BAR_COUNT = 48;
+function clock(ms: number) {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
 
-function App() {
-  const [listening, setListening] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [bars, setBars] = useState<number[]>(() => Array(BAR_COUNT).fill(0));
-  const [readout, setReadout] = useState<{ freq: number; high: number; total: number; score: number; sev: Severity } | null>(null);
-  const [saved, setSaved] = useState<ScanRecord[]>([]);
-  const [saving, setSaving] = useState(false);
+export default function App() {
+  const [mode, setMode] = useState<Mode>("idle");
+  const [result, setResult] = useState<Measurement | null>(null);
+  const [useEstimate, setUseEstimate] = useState(false);
+  const [failure, setFailure] = useState<{ source: Source; message: string } | null>(null);
+  const [taps, setTaps] = useState<number[]>([]);
 
-  const ctxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const dataRef = useRef<Uint8Array | null>(null);
+  const [unit, setUnit] = useState<Unit>("gal");
+  const [price, setPrice] = useState("0.01");
+  const [repairKind, setRepairKind] = useState<RepairKind>("diy");
+  const [repairCosts, setRepairCosts] = useState<Record<RepairKind, string>>({ diy: "15", plumber: "200" });
 
-  const stop = useCallback(() => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    if (ctxRef.current && ctxRef.current.state !== "closed") {
-      ctxRef.current.close().catch(() => {});
-    }
-    ctxRef.current = null;
-    analyserRef.current = null;
-    dataRef.current = null;
-    setListening(false);
-  }, []);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
-  const start = useCallback(async () => {
-    setError(null);
-    setReadout(null);
+  const session = useDropSession({
+    minMs: 30000,
+    maxMs: 90000,
+    minDrops: 6,
+    onDone: (source, onsets, durationMs) => {
+      setMode("idle");
+      setResult(analyze(source, onsets, durationMs));
+    },
+  });
+
+  function reset(next: Mode) {
+    session.cancel();
+    setResult(null);
+    setUseEstimate(false);
+    setFailure(null);
+    setMode(next);
+  }
+
+  async function listen() {
+    reset("mic");
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-      });
-      streamRef.current = stream;
-
-      const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const ctx = new Ctx();
-      ctxRef.current = ctx;
-
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 2048;
-      analyser.smoothingTimeConstant = 0.8;
-      source.connect(analyser);
-      analyserRef.current = analyser;
-
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      dataRef.current = data;
-      setListening(true);
-
-      const tick = () => {
-        if (!analyserRef.current || !dataRef.current) return;
-        analyserRef.current.getByteFrequencyData(dataRef.current);
-
-        const nyquist = ctx.sampleRate / 2;
-        const binCount = dataRef.current.length;
-        const binHz = nyquist / binCount;
-
-        const usable = Math.floor(binCount * 0.5);
-        const step = Math.floor(usable / BAR_COUNT) || 1;
-        const next: number[] = [];
-        for (let i = 0; i < BAR_COUNT; i++) {
-          let sum = 0;
-          for (let j = 0; j < step; j++) sum += dataRef.current[i * step + j] ?? 0;
-          next.push(sum / step / 255);
-        }
-        setBars(next);
-
-        let highSum = 0, highCount = 0, totalSum = 0, peakIdx = 0, peakVal = 0;
-        for (let i = 0; i < binCount; i++) {
-          const v = dataRef.current[i];
-          totalSum += v;
-          const freq = i * binHz;
-          if (freq >= 5000 && freq <= 16000) { highSum += v; highCount++; }
-          if (v > peakVal) { peakVal = v; peakIdx = i; }
-        }
-        const high = highCount > 0 ? highSum / highCount / 255 : 0;
-        const total = binCount > 0 ? totalSum / binCount / 255 : 0;
-        const score = Math.min(1, high * 1.6 + total * 0.15);
-
-        setReadout({ freq: peakIdx * binHz, high, total, score, sev: scoreToSeverity(score) });
-        rafRef.current = requestAnimationFrame(tick);
-      };
-      rafRef.current = requestAnimationFrame(tick);
+      session.start(await micSampler(), "mic", MIC_DETECTOR);
     } catch (e) {
-      setError(e instanceof Error ? e.message.toLowerCase() : "could not access microphone");
-      setListening(false);
+      setMode("idle");
+      setFailure({ source: "mic", message: `microphone unavailable: ${errorText(e)}` });
     }
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
-      if (ctxRef.current && ctxRef.current.state !== "closed") ctxRef.current.close().catch(() => {});
-    };
-  }, []);
-
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from("drippy_scans").select("*").order("created_at", { ascending: false }).limit(20);
-      if (data) setSaved(data as ScanRecord[]);
-    })();
-  }, []);
-
-  async function saveScan() {
-    if (!readout) return;
-    setSaving(true);
-    const { data } = await supabase
-      .from("drippy_scans")
-      .insert({
-        severity: readout.sev,
-        dominant_freq: Math.round(readout.freq),
-        high_energy: Number(readout.high.toFixed(3)),
-        total_energy: Number(readout.total.toFixed(3)),
-        score: Number(readout.score.toFixed(3)),
-      })
-      .select("*")
-      .single();
-    if (data) setSaved((prev) => [data as ScanRecord, ...prev].slice(0, 20));
-    setSaving(false);
   }
 
-  async function deleteScan(id: string) {
-    const { error } = await supabase.from("drippy_scans").delete().eq("id", id);
-    if (!error) setSaved((prev) => prev.filter((s) => s.id !== id));
+  async function watch() {
+    reset("camera");
+    try {
+      session.start(await cameraSampler(videoRef.current!), "camera", CAMERA_DETECTOR);
+    } catch (e) {
+      setMode("idle");
+      setFailure({ source: "camera", message: `camera unavailable: ${errorText(e)}` });
+    }
   }
 
-  const sev = readout ? severityInfo[readout.sev] : null;
+  function startTapping() {
+    reset("tap");
+    setTaps([]);
+  }
+
+  function finishTapping() {
+    const t0 = taps[0] ?? 0;
+    setResult(analyze("tap", taps.map((t) => t - t0), taps.length ? taps[taps.length - 1] - t0 : 0));
+    setMode("idle");
+  }
+
+  function stopEarly() {
+    session.finish();
+  }
+
+  function cancel() {
+    reset("idle");
+  }
+
+  function switchUnit(next: Unit) {
+    if (next === unit) return;
+    const p = parseFloat(price);
+    if (Number.isFinite(p)) {
+      const converted = next === "l" ? p / LITERS_PER_GAL : p * LITERS_PER_GAL;
+      setPrice(String(Number(converted.toPrecision(3))));
+    }
+    setUnit(next);
+  }
+
+  const lowResult = result && result.confidence === "low" ? result : null;
+  const fallbackFrom: Source | null = mode !== "idle" ? null : (failure?.source ?? (lowResult && !useEstimate ? lowResult.source : null));
+  const measured = result && result.dropsPerMin !== null && (result.confidence !== "low" || useEstimate) ? result : null;
+
+  // cost math
+  const dpm = measured?.dropsPerMin ?? 0;
+  const lpd = litersPerDay(dpm);
+  const priceNum = Math.max(0, parseFloat(price) || 0);
+  const pricePerLiter = unit === "gal" ? priceNum / LITERS_PER_GAL : priceNum;
+  const costPerDay = lpd * pricePerLiter;
+  const repair = Math.max(0, parseFloat(repairCosts[repairKind]) || 0);
+  const breakEvenDays = costPerDay > 0 ? repair / costPerDay : Infinity;
+  const shouldFix = breakEvenDays <= FIX_HORIZON_DAYS;
 
   return (
     <div className="min-h-screen bg-white text-neutral-900">
-      <div className="mx-auto max-w-md px-5 py-10">
-        {/* header */}
-        <div className="mb-8 flex items-center gap-2">
-          <Mic size={18} className="text-cyan-600" />
-          <h1 className="text-lg font-semibold lowercase">drippy</h1>
-        </div>
+      <main className="mx-auto max-w-xl px-4 py-8 sm:py-12">
+        <header className="flex items-baseline justify-between border-b border-neutral-900 pb-3">
+          <h1 className="text-base font-medium">drippy</h1>
+          <span className="text-xs text-neutral-500">drip cost analyzer</span>
+        </header>
 
-        {/* control */}
-        <div className="mb-6">
-          {!listening ? (
-            <button
-              onClick={start}
-              className="w-full rounded-lg bg-cyan-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-cyan-700 lowercase"
-            >
-              start listening
-            </button>
-          ) : (
-            <button
-              onClick={stop}
-              className="w-full rounded-lg bg-red-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-red-700 lowercase"
-            >
-              stop
-            </button>
-          )}
-        </div>
-
-        {error && (
-          <p className="mb-6 rounded-lg bg-red-50 p-3 text-xs text-red-700 lowercase">{error}. allow mic access and try again.</p>
-        )}
-
-        {/* waveform */}
-        <div className="mb-6 flex h-32 items-end justify-center gap-1 rounded-lg border border-neutral-200 bg-neutral-50 p-3">
-          {bars.map((h, i) => (
-            <span
-              key={i}
-              className={`w-1.5 rounded-sm ${listening ? "bg-cyan-600" : "bg-neutral-300"}`}
-              style={{ height: `${Math.max(2, h * 100)}%`, transition: "height 0.08s linear" }}
-            />
-          ))}
-        </div>
-
-        {/* live readout */}
-        {listening && readout && sev && (
-          <div className="mb-8 space-y-4">
-            <div className={`rounded-lg p-4 ${sev.bg}`}>
-              <p className="text-xs text-neutral-500 lowercase">severity</p>
-              <p className={`mt-1 text-3xl font-bold lowercase ${sev.color}`}>{readout.sev}</p>
-              <p className="mt-2 text-xs text-neutral-600 lowercase">{sev.desc}</p>
-              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-neutral-200">
-                <div className={`h-full rounded-full ${readout.sev === "high" ? "bg-red-500" : readout.sev === "medium" ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${Math.round(readout.score * 100)}%` }} />
+        <Section n="01" title="measure">
+          {mode === "idle" && !fallbackFrom && (
+            <>
+              <p className="text-sm text-neutral-600">
+                hold your mic close to where the drops land and keep the room quiet. drippy listens for 30 seconds, longer
+                for slow drips.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button primary onClick={listen}>
+                  {result ? "listen again" : "start listening"}
+                </Button>
+                <Button onClick={watch}>use camera</Button>
+                <Button onClick={startTapping}>tap manually</Button>
               </div>
-            </div>
-
-            <div className="rounded-lg border border-neutral-200 p-4 text-sm">
-              <Row label="dominant freq" value={`${(readout.freq / 1000).toFixed(1)} khz`} />
-              <Row label="high-band energy" value={`${Math.round(readout.high * 100)}%`} />
-              <Row label="overall energy" value={`${Math.round(readout.total * 100)}%`} />
-              <Row label="leak score" value={`${Math.round(readout.score * 100)}`} />
-            </div>
-
-            <button
-              onClick={saveScan}
-              disabled={saving}
-              className="w-full rounded-lg border border-cyan-600 px-4 py-2.5 text-sm font-semibold text-cyan-700 transition-colors hover:bg-cyan-50 disabled:opacity-40 lowercase"
-            >
-              {saving ? "saving..." : "save scan"}
-            </button>
-          </div>
-        )}
-
-        {!listening && !error && (
-          <p className="mb-8 text-center text-xs text-neutral-400 lowercase">press start, then hold your phone near a wall or pipe.</p>
-        )}
-
-        {/* history */}
-        <div>
-          <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-neutral-500">saved scans</p>
-          {saved.length === 0 ? (
-            <p className="text-xs text-neutral-400 lowercase">no saved scans yet.</p>
-          ) : (
-            <div className="space-y-2">
-              {saved.map((s) => {
-                const info = severityInfo[s.severity];
-                return (
-                  <div key={s.id} className="flex items-center justify-between rounded-lg border border-neutral-200 p-3">
-                    <div>
-                      <p className={`text-sm font-semibold lowercase ${info.color}`}>{s.severity}</p>
-                      <p className="mt-0.5 text-xs text-neutral-500 lowercase">
-                        {(s.dominant_freq / 1000).toFixed(1)} khz · score {Math.round(s.score * 100)} · {new Date(s.created_at).toLocaleString().toLowerCase()}
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => deleteScan(s.id)}
-                      className="rounded p-1 text-neutral-400 transition-colors hover:bg-red-50 hover:text-red-600"
-                      aria-label="delete"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
+            </>
           )}
-        </div>
-      </div>
+
+          {fallbackFrom && (
+            <Fallback
+              from={fallbackFrom}
+              blocked={failure !== null}
+              message={failure?.message ?? lowResult?.reason ?? ""}
+              estimate={lowResult?.dropsPerMin ?? null}
+              onCamera={watch}
+              onListen={listen}
+              onTap={startTapping}
+              onUseEstimate={() => setUseEstimate(true)}
+            />
+          )}
+
+          <div className={mode === "camera" ? "relative mb-3" : "hidden"}>
+            <video ref={videoRef} playsInline muted className="block h-auto w-full bg-neutral-100" />
+            <div
+              className="absolute inset-y-0 border-x border-dashed border-blue-600"
+              style={{ left: `${CAMERA_ROI.left * 100}%`, width: `${CAMERA_ROI.width * 100}%` }}
+            />
+          </div>
+
+          {(mode === "mic" || mode === "camera") && (
+            <>
+              <canvas ref={session.canvasRef} className="block h-20 w-full border border-neutral-200" />
+              <div className="mt-3 flex items-baseline justify-between text-sm">
+                <span>
+                  {session.drops} drop{session.drops === 1 ? "" : "s"}
+                </span>
+                <span className="tabular-nums text-neutral-500">{clock(session.elapsed)}</span>
+              </div>
+              <p className="mt-2 text-xs text-neutral-500">
+                {mode === "mic"
+                  ? "listening. each blue tick is a drop. stops on its own once it has enough."
+                  : "keep the falling drops inside the dashed strip and hold still. each blue tick is a drop."}
+              </p>
+              <div className="mt-4 flex gap-2">
+                <Button primary onClick={stopEarly}>
+                  stop
+                </Button>
+                <Button onClick={cancel}>cancel</Button>
+              </div>
+            </>
+          )}
+
+          {mode === "tap" && (
+            <>
+              <p className="text-sm text-neutral-600">tap the button each time a drop lands. 6 or more taps works best.</p>
+              <button
+                type="button"
+                onPointerDown={() => setTaps((t) => [...t, performance.now()])}
+                className="mt-4 h-32 w-full touch-manipulation select-none border border-neutral-900 text-sm active:bg-neutral-900 active:text-white"
+              >
+                tap
+              </button>
+              <div className="mt-3 flex items-center justify-between">
+                <span className="text-sm">
+                  {taps.length} tap{taps.length === 1 ? "" : "s"}
+                </span>
+                <div className="flex gap-2">
+                  <Button primary onClick={finishTapping} disabled={taps.length < 3}>
+                    done
+                  </Button>
+                  <Button onClick={cancel}>cancel</Button>
+                </div>
+              </div>
+            </>
+          )}
+        </Section>
+
+        {measured && (
+          <>
+            <Section n="02" title="rate">
+              <div className="flex items-baseline gap-2">
+                <span className="text-4xl tabular-nums text-blue-600">{formatRate(dpm)}</span>
+                <span className="text-sm">drops / min</span>
+              </div>
+              <p className="mt-2 text-xs text-neutral-500">
+                one drop every {((measured.intervalMs ?? 0) / 1000).toFixed(1)} s · {measured.confidence} confidence ·{" "}
+                {measured.drops} drops in {Math.round(measured.durationMs / 1000)} s from {SOURCE_LABEL[measured.source]}
+              </p>
+            </Section>
+
+            <Section n="03" title="cost">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+                <span className="text-neutral-500">water price</span>
+                <span className="flex items-baseline">
+                  $<NumberInput value={price} onChange={setPrice} step="0.001" label="water price" />
+                </span>
+                <span className="text-neutral-500">per</span>
+                <Toggle options={["gal", "l"] as const} value={unit} onChange={switchUnit} />
+              </div>
+              <table className="mt-4 w-full text-sm tabular-nums">
+                <thead>
+                  <tr className="border-b border-neutral-200 text-left text-xs text-neutral-500">
+                    <th className="py-2 font-normal">per</th>
+                    <th className="py-2 text-right font-normal">water</th>
+                    <th className="py-2 text-right font-normal">cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {PERIODS.map(([label, days]) => (
+                    <tr key={label} className="border-b border-neutral-100">
+                      <td className="py-2">{label}</td>
+                      <td className="py-2 text-right">{formatVolume(lpd * days, unit)}</td>
+                      <td className="py-2 text-right">{formatMoney(costPerDay * days)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="mt-2 text-xs text-neutral-500">assumes 0.25 ml per drop.</p>
+            </Section>
+
+            <Section n="04" title="break-even">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+                <span className="text-neutral-500">repair</span>
+                <Toggle options={["diy", "plumber"] as const} value={repairKind} onChange={setRepairKind} />
+                <span className="flex items-baseline">
+                  $
+                  <NumberInput
+                    value={repairCosts[repairKind]}
+                    onChange={(v) => setRepairCosts((c) => ({ ...c, [repairKind]: v }))}
+                    step="1"
+                    label="repair cost"
+                  />
+                </span>
+              </div>
+              {costPerDay > 0 ? (
+                <>
+                  <p className="mt-4 text-sm">
+                    the leak costs more than the repair after <span className="text-blue-600">{formatDuration(breakEvenDays)}</span>.
+                  </p>
+                  <div className="mt-4">
+                    <div className="relative h-2 bg-neutral-100">
+                      <div
+                        className={`absolute inset-y-0 left-0 ${shouldFix ? "bg-blue-600" : "bg-neutral-300"}`}
+                        style={{ width: `${Math.min(1, breakEvenDays / FIX_HORIZON_DAYS) * 100}%` }}
+                      />
+                    </div>
+                    <div className="mt-1 flex justify-between text-xs text-neutral-500">
+                      <span>today</span>
+                      <span>{shouldFix ? "" : "beyond "}1 year</span>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <p className="mt-4 text-sm">at this water price the leak costs nothing, so it never outprices the repair.</p>
+              )}
+            </Section>
+
+            <Section n="05" title="verdict">
+              <p className="text-2xl">{shouldFix ? "fix it" : "leave it"}</p>
+              <p className="mt-2 text-sm text-neutral-600">
+                {shouldFix
+                  ? `a ${formatMoney(repair)} ${repairKind === "diy" ? "diy repair" : "plumber visit"} pays for itself in ${formatDuration(breakEvenDays)}. left alone, this drip costs about ${formatMoney(costPerDay * 365)} a year.`
+                  : `this drip costs about ${formatMoney(costPerDay * 365)} a year, so a ${formatMoney(repair)} ${repairKind === "diy" ? "diy repair" : "plumber visit"} wouldn't pay for itself within a year. measure again in a month, since drips tend to get worse.`}
+              </p>
+              {measured.confidence === "low" && (
+                <p className="mt-2 text-xs text-neutral-500">based on a low-confidence estimate.</p>
+              )}
+            </Section>
+          </>
+        )}
+      </main>
     </div>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Section({ n, title, children }: { n: string; title: string; children: ReactNode }) {
   return (
-    <div className="flex justify-between py-1">
-      <span className="text-neutral-500 lowercase">{label}</span>
-      <span className="font-medium lowercase">{value}</span>
-    </div>
+    <section className="border-b border-neutral-200 py-6">
+      <h2 className="mb-4 text-xs text-neutral-500">
+        {n} · {title}
+      </h2>
+      {children}
+    </section>
   );
 }
 
-export default App;
+function Button({
+  primary,
+  disabled,
+  onClick,
+  children,
+}: {
+  primary?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`px-4 py-2 text-sm transition-colors disabled:opacity-30 ${
+        primary
+          ? "bg-neutral-900 text-white hover:bg-neutral-700"
+          : "border border-neutral-300 hover:border-neutral-900"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Toggle<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: readonly T[];
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <span className="inline-flex border border-neutral-300">
+      {options.map((o) => (
+        <button
+          key={o}
+          type="button"
+          onClick={() => onChange(o)}
+          className={`px-2 py-0.5 text-sm ${o === value ? "bg-neutral-900 text-white" : "hover:bg-neutral-100"}`}
+        >
+          {o}
+        </button>
+      ))}
+    </span>
+  );
+}
+
+function NumberInput({
+  value,
+  onChange,
+  step,
+  label,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  step: string;
+  label: string;
+}) {
+  return (
+    <input
+      type="number"
+      inputMode="decimal"
+      min="0"
+      step={step}
+      value={value}
+      aria-label={label}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-20 border-b border-neutral-300 bg-transparent py-0.5 pl-1 text-sm tabular-nums focus:border-neutral-900 focus:outline-none"
+    />
+  );
+}
+
+function Fallback({
+  from,
+  blocked,
+  message,
+  estimate,
+  onCamera,
+  onListen,
+  onTap,
+  onUseEstimate,
+}: {
+  from: Source;
+  /** the device couldn't be opened at all, rather than giving an unclear reading */
+  blocked: boolean;
+  message: string;
+  estimate: number | null;
+  onCamera: () => void;
+  onListen: () => void;
+  onTap: () => void;
+  onUseEstimate: () => void;
+}) {
+  const text = blocked
+    ? `${message}. ${from === "mic" ? "the camera can watch the drops instead." : "you can tap along with the drops instead."}`
+    : from === "mic"
+      ? `couldn't count drops reliably from sound (${message}). the camera can watch the drops instead.`
+      : from === "camera"
+        ? `couldn't see drops clearly (${message}). try more light and a closer view, or tap along with the drops.`
+        : `couldn't get a steady rhythm from your taps (${message}).`;
+
+  return (
+    <div className="border border-neutral-900 p-4">
+      <p className="text-sm">{text}</p>
+      <div className="mt-4 flex flex-wrap gap-2">
+        {from === "mic" && (
+          <>
+            <Button primary onClick={onCamera}>
+              allow camera
+            </Button>
+            <Button onClick={onListen}>listen again</Button>
+            <Button onClick={onTap}>tap manually</Button>
+          </>
+        )}
+        {from === "camera" && (
+          <>
+            <Button primary onClick={onTap}>
+              tap manually
+            </Button>
+            <Button onClick={onCamera}>try camera again</Button>
+            <Button onClick={onListen}>listen again</Button>
+          </>
+        )}
+        {from === "tap" && (
+          <>
+            <Button primary onClick={onTap}>
+              tap again
+            </Button>
+            <Button onClick={onListen}>listen instead</Button>
+          </>
+        )}
+      </div>
+      {estimate !== null && (
+        <button type="button" onClick={onUseEstimate} className="mt-3 text-xs text-neutral-500 underline hover:text-neutral-900">
+          use the rough estimate anyway ({formatRate(estimate)} drops / min)
+        </button>
+      )}
+    </div>
+  );
+}

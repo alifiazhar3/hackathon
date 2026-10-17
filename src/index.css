@@ -4,7 +4,13 @@
 
 @layer base {
   html {
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    text-transform: lowercase;
+  }
+
+  button,
+  input {
+    text-transform: inherit;
   }
 }
 
