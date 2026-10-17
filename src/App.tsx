@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode }
 import {
   analyze,
   streamMeasurement,
+  TIMING_FLOOR_MS,
   FIX_HORIZON_DAYS,
   formatDuration,
   formatMoney,
@@ -18,8 +19,9 @@ import { cameraSampler, COLUMN_HALF_WIDTH, micSampler, openCamera, type SamplerS
 import { findRhythm } from "@/lib/rhythm";
 import { useDropSession } from "@/lib/useDropSession";
 import { BottleSimulation } from "@/BottleSimulation";
+import { RecordingTester } from "@/RecordingTester";
 
-type Mode = "idle" | "mic" | "camera" | "tap";
+type Mode = "idle" | "mic" | "camera" | "tap" | "file";
 type RepairKind = "diy" | "plumber";
 
 const SOURCE_LABEL: Record<Source, string> = { mic: "sound", camera: "camera", tap: "taps" };
@@ -78,7 +80,10 @@ export default function App() {
   });
 
   // drops so far that fit a steady rhythm (sounds that don't fit are ignored)
-  const live = useMemo(() => findRhythm(session.onsets), [session.onsets]);
+  const live = useMemo(
+    () => findRhythm(session.onsets, TIMING_FLOOR_MS[mode === "camera" ? "camera" : "mic"]),
+    [session.onsets, mode],
+  );
 
   function closeCamera() {
     closeCameraRef.current?.();
@@ -204,8 +209,23 @@ export default function App() {
                 </Button>
                 <Button onClick={watch}>use camera</Button>
                 <Button onClick={startTapping}>tap manually</Button>
+                <Button onClick={() => reset("file")}>test a recording</Button>
               </div>
             </>
+          )}
+
+          {mode === "file" && (
+            <RecordingTester
+              onUse={(m) => {
+                setResult(m);
+                setMode("idle");
+              }}
+              onStream={() => {
+                setMode("idle");
+                setStreamFound(true);
+              }}
+              onCancel={cancel}
+            />
           )}
 
           {fallbackFrom && (

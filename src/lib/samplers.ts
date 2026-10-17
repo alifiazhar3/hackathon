@@ -41,7 +41,7 @@ export async function micSampler(): Promise<Sampler> {
 
   return {
     level: () => detector.level,
-    threshold: () => AudioDropDetector.thresholdDb,
+    threshold: () => detector.thresholdDb,
     takeOnsets() {
       const fresh = detector.onsets.slice(taken).map((s) => s * 1000);
       taken = detector.onsets.length;

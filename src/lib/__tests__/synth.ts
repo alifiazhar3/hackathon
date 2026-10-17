@@ -19,15 +19,21 @@ export function gauss(r: () => number) {
 
 export const SR = 48000;
 
-/** a water drop "plink": a decaying tone plus a tiny click */
+/**
+ * a water drop "plink", modelled on a real recording: a tone around 1.4–2.3 khz
+ * that glides upward in pitch and fades within ~20 ms, plus a tiny click
+ */
 function addPlink(buf: Float32Array, at: number, amp: number, r: () => number) {
-  const freq = 1500 + r() * 2000;
-  const tau = 0.025 + r() * 0.015;
+  const freq = 1400 + r() * 900;
+  const glide = 0.2 + r() * 0.3;
+  const tau = 0.005 + r() * 0.004;
   const start = Math.floor(at * SR);
-  const len = Math.floor(tau * 6 * SR);
+  const len = Math.floor(tau * 8 * SR);
+  let phase = 0;
   for (let i = 0; i < len && start + i < buf.length; i++) {
     const t = i / SR;
-    let v = amp * Math.exp(-t / tau) * Math.sin(2 * Math.PI * freq * t);
+    phase += (2 * Math.PI * freq * (1 + glide * Math.min(1, t / 0.02))) / SR;
+    let v = amp * Math.exp(-t / tau) * Math.sin(phase);
     if (t < 0.002) v += amp * 0.5 * gauss(r) * (1 - t / 0.002);
     buf[start + i] += v;
   }

@@ -15,7 +15,7 @@
 /** time spent learning the camera's own noise before counting */
 export const CAMERA_CALIBRATE_MS = 1000;
 /** half-width of the watched column, as a fraction of the frame width */
-export const COLUMN_HALF_WIDTH = 0.04;
+export const COLUMN_HALF_WIDTH = 0.08;
 
 /** a frame is ignored if this share of the picture changed at once */
 const GLOBAL_CHANGE_LIMIT = 0.12;
@@ -35,6 +35,34 @@ const MIN_FALL = 0.06;
 const MAX_DRIFT = 8;
 /** later speed must be at least this share of earlier speed (it accelerates) */
 const MIN_SPEEDUP = 0.9;
+/**
+ * ...and by the end it must be moving at least this share of the frame height
+ * per 100 ms. a drop swelling at the spout sags downward too, but far slower.
+ */
+const MIN_FALL_SPEED = 0.12;
+/**
+ * tested on a real recording, following falling objects added false drops
+ * (a swelling drop sags like a slow fall) and the sudden-change check alone
+ * caught every drop, so tracking no longer counts drops on its own
+ */
+const TRACKER_COUNTS = false;
+/**
+ * many drops cross the picture in a single frame (seen as a streak) or simply
+ * vanish from the spout between frames. a sudden, compact change in the column
+ * counts as a drop: at least this many changed pixels per row of the picture...
+ */
+const SUDDEN_MIN_PIXELS_PER_ROW = 0.15;
+/** ...and well above the column's usual frame-to-frame change */
+const SUDDEN_OVER_USUAL = 5;
+/** ...but not so much that it's a hand or something big passing */
+const SUDDEN_MAX_SHARE = 0.25;
+/** a drop changes almost nothing outside the column; shake or a passing hand changes more than this share of the picture */
+const SUDDEN_MAX_GLOBAL = 0.02;
+/** a drop or its streak is narrow: changes spanning more of the column than this are something else */
+const SUDDEN_MAX_WIDTH = 0.45;
+/** changes this close together are the same drop (forming, falling, splashing) */
+const SAME_DROP_MS = 250;
+const USUAL_WINDOW = 60;
 
 /** a stream must cover this share of the frame height in one unbroken run */
 const STREAM_MIN_LENGTH = 0.4;
@@ -93,7 +121,8 @@ export class VideoDropDetector {
 
     const [f0, f1, f2] = this.frames;
 
-    if (this.globalChange(f1, f2) > GLOBAL_CHANGE_LIMIT) {
+    const global = this.globalChange(f1, f2);
+    if (global > GLOBAL_CHANGE_LIMIT) {
       // the whole picture moved or changed brightness: nothing here is a drop
       this.status = "unsteady";
       this.tracks = [];
@@ -104,6 +133,8 @@ export class VideoDropDetector {
     if (t - this.startedAt < CAMERA_CALIBRATE_MS) {
       this.status = "calibrating";
       this.sampleNoise(f1, f2);
+      if (!this.calibrationFrames.length) this.calibrationFrames.push(f1);
+      this.calibrationFrames.push(f2);
       return;
     }
     if (this.noiseSamples.length) {
@@ -111,7 +142,14 @@ export class VideoDropDetector {
       const sigma = sorted[Math.floor(sorted.length / 2)] * 1.4826;
       this.threshold = Math.max(MIN_DIFF, sigma * 5);
       this.noiseSamples = [];
+      // now that the camera's noise is known, look for drops in the first second too
+      const cf = this.calibrationFrames;
+      const counts = cf.slice(1).map((b, i) => this.countChange(cf[i], b));
+      this.usual = counts.slice(-USUAL_WINDOW).map((c) => c.changed);
+      counts.forEach((c, i) => this.judgeChange(c, this.globalChange(cf[i], cf[i + 1]), cf[i + 1].t));
+      this.calibrationFrames = [];
     }
+    this.checkSuddenChange(f1, f2, global);
     const blobs = this.findBlobs(f0, f1, f2);
     this.status = this.stream ? "stream" : "watching";
     if (blobs === null) {
@@ -290,6 +328,56 @@ export class VideoDropDetector {
     return blobs.length > MAX_BLOBS ? null : blobs;
   }
 
+  /** recent frame-to-frame change in the column, to know what "usual" looks like */
+  private usual: number[] = [];
+  private calibrationFrames: { gray: Uint8Array; t: number; mean: number }[] = [];
+
+  /** pixels in the column that changed between two frames, after brightness correction */
+  /** pixels in the column that changed between two frames (after brightness correction), and how wide the change is */
+  private countChange(a: { gray: Uint8Array; mean: number }, b: { gray: Uint8Array; mean: number }) {
+    const shift = b.mean - a.mean;
+    let changed = 0;
+    const perX = new Int32Array(this.x1 - this.x0);
+    for (let y = 0; y < this.height - 1; y++) {
+      for (let x = this.x0; x < this.x1 - 1; x++) {
+        const i = y * this.width + x;
+        if (Math.abs(this.px(b.gray, i) - this.px(a.gray, i) - shift) > this.threshold) {
+          changed++;
+          perX[x - this.x0]++;
+        }
+      }
+    }
+    // width = columns holding most of the change (ignore stray noisy pixels)
+    let width = 0;
+    for (const n of perX) if (n >= Math.max(2, changed * 0.02)) width++;
+    return { changed, width };
+  }
+
+  private judgeChange({ changed, width }: { changed: number; width: number }, global: number, t: number) {
+    // "usual" comes from the quieter frames, so frequent drops don't raise it
+    const sorted = [...this.usual].sort((p, q) => p - q);
+    const usual = sorted.length ? sorted[Math.floor(sorted.length * 0.3)] : changed;
+    const area = (this.height - 1) * (this.x1 - this.x0 - 1);
+    const narrow = width <= (this.x1 - this.x0) * SUDDEN_MAX_WIDTH;
+    const big = changed >= this.height * SUDDEN_MIN_PIXELS_PER_ROW && changed >= usual * SUDDEN_OVER_USUAL;
+    if (!this.stream && narrow && big && global <= SUDDEN_MAX_GLOBAL && changed <= area * SUDDEN_MAX_SHARE) {
+      this.addOnset(t);
+    }
+  }
+
+  private checkSuddenChange(a: { gray: Uint8Array; mean: number }, b: { gray: Uint8Array; mean: number; t: number }, global: number) {
+    const change = this.countChange(a, b);
+    this.judgeChange(change, global, b.t);
+    this.usual.push(change.changed);
+    if (this.usual.length > USUAL_WINDOW) this.usual.shift();
+  }
+
+  /** records a drop unless another was just counted (the same drop seen twice) */
+  private addOnset(t: number) {
+    if (this.onsets.some((o) => Math.abs(o - t) < SAME_DROP_MS)) return;
+    this.onsets.push(t);
+  }
+
   private track(blobs: Blob[], t: number) {
     this.tracks = this.tracks.filter((tr) => t - tr.points[tr.points.length - 1].t <= TRACK_TIMEOUT_MS);
     const used = new Set<Track>();
@@ -320,7 +408,7 @@ export class VideoDropDetector {
       if (best) {
         best.points.push({ t, x: b.x, y: b.y });
         used.add(best);
-        this.maybeCount(best);
+        if (TRACKER_COUNTS) this.maybeCount(best);
       } else {
         const tr: Track = { points: [{ t, x: b.x, y: b.y }], counted: false };
         this.tracks.push(tr);
@@ -336,7 +424,10 @@ export class VideoDropDetector {
     if (last.y - first.y < Math.max(6, this.height * MIN_FALL)) return;
     const xs = tr.points.map((p) => p.x);
     if (Math.max(...xs) - Math.min(...xs) > MAX_DRIFT) return;
+    const prev = tr.points[tr.points.length - 2];
+    const speedPer100ms = ((last.y - prev.y) / (last.t - prev.t)) * 100;
+    if (speedPer100ms < this.height * MIN_FALL_SPEED) return;
     tr.counted = true;
-    this.onsets.push(first.t);
+    this.addOnset(first.t);
   }
 }

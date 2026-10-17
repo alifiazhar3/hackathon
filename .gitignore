@@ -21,3 +21,6 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# third-party test recording and data decoded from it (kept local)
+test-media/
