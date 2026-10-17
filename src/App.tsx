@@ -22,7 +22,6 @@ import { BottleSimulation } from "@/BottleSimulation";
 import { RecordingTester } from "@/RecordingTester";
 import {
   BottlePic,
-  BucketPic,
   CalendarPic,
   CameraPic,
   CoinsPic,
@@ -40,6 +39,18 @@ import {
   WrenchPic,
 } from "@/Pictures";
 import logo from "@/assets/drippy-logo.png";
+import {
+  breakEvenDays as breakEvenWithGrowth,
+  costOfWaiting,
+  DRINKING_LITERS_PER_DAY,
+  LOCATIONS,
+  MONTHLY_GROWTH,
+  SHOWER_LITERS,
+  urgency,
+  WAITS,
+  type Location,
+  type Urgency,
+} from "@/lib/urgency";
 
 type Mode = "idle" | "mic" | "camera" | "tap" | "file";
 type RepairKind = "diy" | "plumber";
@@ -76,6 +87,7 @@ export default function App() {
   const [price, setPrice] = useState("0.01");
   const [repairKind, setRepairKind] = useState<RepairKind>("diy");
   const [repairCosts, setRepairCosts] = useState<Record<RepairKind, string>>({ diy: "15", plumber: "200" });
+  const [location, setLocation] = useState<Location>("sink");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   /** turns the camera off while it is open for aiming but not yet counting */
@@ -205,8 +217,14 @@ export default function App() {
   const pricePerLiter = unit === "gal" ? priceNum / LITERS_PER_GAL : priceNum;
   const costPerDay = lpd * pricePerLiter;
   const repair = Math.max(0, parseFloat(repairCosts[repairKind]) || 0);
-  const breakEvenDays = costPerDay > 0 ? repair / costPerDay : Infinity;
+  // the drip is assumed to keep worsening, so the leak catches up with the repair sooner
+  const breakEvenDays = breakEvenWithGrowth(costPerDay, repair);
   const shouldFix = breakEvenDays <= FIX_HORIZON_DAYS;
+  const howUrgent = urgency({ dropsPerMin: dpm, location, breakEven: breakEvenDays, stream: !!measured?.stream });
+  const waits = WAITS.map(([label, days]) => ({ label, days, total: repair + costOfWaiting(costPerDay, days) }));
+  const worstWait = Math.max(...waits.map((w) => w.total), 0.01);
+  // a year's water with the drip worsening (costOfWaiting with a cost of 1 a day sums the rate growth)
+  const litersAYear = lpd * costOfWaiting(1, 365);
 
   return (
     <div className="min-h-screen bg-sky font-sans text-water-ink">
@@ -465,6 +483,10 @@ export default function App() {
                     the leak costs more than the repair after{" "}
                     <span className="rounded-full bg-sun-light px-2 font-semibold text-sun-deep">{formatDuration(breakEvenDays)}</span>.
                   </p>
+                  <p className="mt-1 text-xs text-water-deep">
+                    assuming the drip keeps worsening about {Math.round(MONTHLY_GROWTH * 100)}% a month, as worn washers and seals
+                    do.
+                  </p>
                   <div className="mt-5 flex items-center gap-2">
                     <CoinsPic className="h-9 w-9 shrink-0" />
                     <div className="relative h-5 flex-1 overflow-hidden rounded-full border-[3px] border-water-deep bg-white">
@@ -486,22 +508,69 @@ export default function App() {
             </Section>
 
             <DropsDivider />
-            <Section n="5" title="verdict" picture={<PiggyPic className="h-12 w-12" />} tone={shouldFix ? "leaf" : "water"}>
-              <div
-                className={`flex items-center gap-4 rounded-2xl border-[3px] p-4 ${shouldFix ? "border-leaf bg-leaf-light" : "border-water-light bg-sky-soft"}`}
-              >
+            <Section n="5" title="how urgently" picture={<PiggyPic className="h-12 w-12" />} tone={URGENCY_STYLE[howUrgent.level].tone}>
+              <p className="text-sm text-water-deep">where is the leak?</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {LOCATIONS.map((l) => (
+                  <button
+                    key={l.id}
+                    type="button"
+                    onClick={() => setLocation(l.id)}
+                    className={`rounded-full border-[3px] border-water-deep px-3 py-1 text-sm font-medium ${
+                      location === l.id ? "bg-water-deep text-white" : "bg-white text-water-deep hover:bg-sky"
+                    }`}
+                  >
+                    {l.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className={`mt-4 flex items-center gap-4 rounded-2xl border-[3px] p-4 ${URGENCY_STYLE[howUrgent.level].box}`}>
                 <div className="flex shrink-0 items-end">
-                  {shouldFix ? <HappyDropPic className="bob h-16 w-16" /> : <SleepyDropPic className="bob h-16 w-16" />}
-                  {shouldFix ? <WrenchPic className="-ml-2 h-10 w-10" /> : <BucketPic className="-ml-2 h-10 w-10" />}
+                  {howUrgent.level === "soon" ? <HappyDropPic className="bob h-16 w-16" /> : <SleepyDropPic className="bob h-16 w-16" />}
+                  <WrenchPic className="-ml-2 h-10 w-10" />
                 </div>
                 <div>
-                  <p className={`text-3xl font-bold ${shouldFix ? "text-leaf-deep" : "text-water-deep"}`}>{shouldFix ? "fix it!" : "leave it"}</p>
-                  <p className="mt-1 text-sm">
-                    {shouldFix
-                      ? `a ${formatMoney(repair)} ${repairKind === "diy" ? "diy repair" : "plumber visit"} pays for itself in ${formatDuration(breakEvenDays)}. left alone, this drip costs about ${formatMoney(costPerDay * 365)} a year.`
-                      : `this drip costs about ${formatMoney(costPerDay * 365)} a year, so a ${formatMoney(repair)} ${repairKind === "diy" ? "diy repair" : "plumber visit"} wouldn't pay for itself within a year. measure again in a month, since drips tend to get worse.`}
-                  </p>
+                  <p className={`text-3xl font-bold ${URGENCY_STYLE[howUrgent.level].text}`}>{URGENCY_STYLE[howUrgent.level].title}</p>
+                  <ul className="mt-1 space-y-0.5 text-sm">
+                    {howUrgent.reasons.map((r) => (
+                      <li key={r}>· {r}</li>
+                    ))}
+                  </ul>
                 </div>
+              </div>
+
+              <p className="mt-5 text-sm font-semibold text-water-deep">what it costs in total if you fix it…</p>
+              <div className="mt-2 space-y-2">
+                {waits.map((w, i) => (
+                  <div key={w.label} className="flex items-center gap-3 text-sm">
+                    <span className="w-24 shrink-0">{w.label}</span>
+                    <div className="relative h-5 flex-1 overflow-hidden rounded-full bg-sky">
+                      <div
+                        className={`absolute inset-y-0 left-0 rounded-full ${i === 0 ? "bg-leaf" : "bg-coral"}`}
+                        style={{ width: `${Math.max(4, (w.total / worstWait) * 100)}%` }}
+                      />
+                    </div>
+                    <span className="w-28 shrink-0 text-right tabular-nums">
+                      <span className="font-semibold">{formatMoney(w.total)}</span>
+                      {i > 0 && <span className="block text-xs text-coral-deep">+{formatMoney(w.total - waits[0].total)} wasted</span>}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-water-deep">
+                the {formatMoney(repair)} {repairKind === "diy" ? "diy repair" : "plumber visit"}, plus the water wasted until then, with
+                the drip worsening about {Math.round(MONTHLY_GROWTH * 100)}% a month.
+              </p>
+
+              <div className="mt-5 flex items-start gap-3 rounded-2xl bg-sky-soft p-3">
+                <BottlePic className="h-10 w-10 shrink-0" />
+                <p className="text-sm">
+                  left for a year, this leak wastes about <span className="font-semibold">{formatVolume(litersAYear, unit)}</span>:
+                  a person's drinking water for{" "}
+                  <span className="font-semibold">{formatCount(litersAYear / DRINKING_LITERS_PER_DAY)} days</span>, or{" "}
+                  <span className="font-semibold">{formatCount(litersAYear / SHOWER_LITERS)} showers</span>.
+                </p>
               </div>
               {measured.confidence === "low" && <p className="mt-2 text-xs text-water-deep">based on a low-confidence estimate.</p>}
             </Section>
@@ -522,6 +591,16 @@ function CupTimer({ startedAt }: { startedAt: number }) {
 }
 
 type Tone = "water" | "coral" | "sun" | "leaf";
+
+const URGENCY_STYLE: Record<Urgency, { title: string; tone: Tone; box: string; text: string }> = {
+  now: { title: "fix it now", tone: "coral", box: "border-coral bg-coral-light", text: "text-coral-deep" },
+  month: { title: "fix it this month", tone: "sun", box: "border-sun bg-sun-light", text: "text-sun-deep" },
+  soon: { title: "fix it soon", tone: "leaf", box: "border-leaf bg-leaf-light", text: "text-leaf-deep" },
+};
+
+function formatCount(n: number) {
+  return n < 10 ? n.toFixed(1) : Math.round(n).toLocaleString("en-US");
+}
 
 const TONE_BADGE: Record<Tone, string> = {
   water: "bg-water-light",
