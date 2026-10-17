@@ -15,7 +15,8 @@ import {
   type Source,
   type Unit,
 } from "@/lib/drips";
-import { cameraSampler, COLUMN_HALF_WIDTH, micSampler, openCamera, type SamplerStatus } from "@/lib/samplers";
+import { cameraSampler, COLUMN_HALF_WIDTH, combinedSampler, micSampler, openCamera, type SamplerStatus } from "@/lib/samplers";
+import { fuse, fuseStream, type Fused } from "@/lib/fusion";
 import { findRhythm } from "@/lib/rhythm";
 import { useDropSession } from "@/lib/useDropSession";
 import { BottleSimulation } from "@/BottleSimulation";
@@ -52,10 +53,10 @@ import {
   type Urgency,
 } from "@/lib/urgency";
 
-type Mode = "idle" | "mic" | "camera" | "tap" | "file";
+type Mode = "idle" | "mic" | "camera" | "both" | "tap" | "file";
 type RepairKind = "diy" | "plumber";
 
-const SOURCE_LABEL: Record<Source, string> = { mic: "sound", camera: "camera", tap: "taps" };
+const SOURCE_LABEL: Record<Source, string> = { mic: "sound", camera: "camera", tap: "taps", both: "camera + mic" };
 
 const STATUS_TEXT: Record<SamplerStatus, string> = {
   calibrating: "learning the background first (2 s). keep things as they are.",
@@ -63,6 +64,7 @@ const STATUS_TEXT: Record<SamplerStatus, string> = {
   watching: "watching the blue column. a drop counts only when something small falls straight down it and speeds up.",
   unsteady: "the whole picture is moving. hold the camera still or rest it on something.",
   stream: "that looks like a steady stream, not drops. checking for a few seconds…",
+  both: "watching and listening. a drop counts when it's seen falling and heard landing, or when one of them catches it right on the beat.",
 };
 
 function errorText(e: unknown) {
@@ -99,13 +101,26 @@ export default function App() {
   const [streamFound, setStreamFound] = useState(false);
   const [cupMl, setCupMl] = useState("473");
   const [cupStartedAt, setCupStartedAt] = useState<number | null>(null);
+  /** what camera + mic made of a stream, e.g. "seen and heard as a steady stream" */
+  const [streamNote, setStreamNote] = useState("");
 
   const session = useDropSession({
     minMs: 30000,
     maxMs: 90000,
     minDrops: 6,
-    onDone: (source, onsets, durationMs, stream) => {
+    onDone: (source, onsets, durationMs, stream, channels) => {
       setMode("idle");
+      if (source === "both" && channels) {
+        const judged = fuseStream(stream || channels.pictureStream, channels.soundSteady);
+        if (judged.stream) {
+          setStreamNote(judged.note);
+          setStreamFound(true);
+        } else {
+          setResult(fuse(channels.seen, channels.heard, durationMs));
+        }
+        return;
+      }
+      setStreamNote("");
       if (stream) setStreamFound(true);
       else setResult(analyze(source, onsets, durationMs));
     },
@@ -116,6 +131,13 @@ export default function App() {
     () => findRhythm(session.onsets, TIMING_FLOOR_MS[mode === "camera" ? "camera" : "mic"]),
     [session.onsets, mode],
   );
+  // with camera + mic, the live count is the combined one
+  const liveFused = useMemo(
+    () => (mode === "both" && session.channels ? fuse(session.channels.seen, session.channels.heard, Math.max(1, session.elapsed)) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session.channels, mode],
+  );
+  const liveDrops = liveFused ? liveFused.drops : live.matched.length;
 
   function closeCamera() {
     closeCameraRef.current?.();
@@ -155,8 +177,20 @@ export default function App() {
     }
   }
 
+  /** camera and microphone together: open the camera first so the user can aim */
+  async function watchAndListen() {
+    reset("both");
+    try {
+      closeCameraRef.current = await openCamera(videoRef.current!);
+      setAiming(true);
+    } catch (e) {
+      setMode("idle");
+      setFailure({ source: "camera", message: `camera unavailable: ${errorText(e)}` });
+    }
+  }
+
   /** the user taps the video where the drops fall; counting starts there */
-  function aimAt(e: MouseEvent<HTMLDivElement>) {
+  async function aimAt(e: MouseEvent<HTMLDivElement>) {
     if (!aiming || !videoRef.current) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = Math.min(0.95, Math.max(0.05, (e.clientX - rect.left) / rect.width));
@@ -164,6 +198,16 @@ export default function App() {
     setAiming(false);
     const close = closeCameraRef.current ?? (() => {});
     closeCameraRef.current = null;
+    if (mode === "both") {
+      try {
+        session.start(await combinedSampler(videoRef.current, x, close), "both");
+      } catch (err) {
+        close();
+        setMode("idle");
+        setFailure({ source: "mic", message: `microphone unavailable: ${errorText(err)}` });
+      }
+      return;
+    }
     session.start(cameraSampler(videoRef.current, x, close), "camera");
   }
 
@@ -238,12 +282,27 @@ export default function App() {
           {mode === "idle" && !fallbackFrom && !streamFound && (
             <>
               <p className="text-sm text-water-ink/80">
-                hold your mic close to where the drops land. drippy first learns the background sound, then listens for
-                30 seconds, longer for slow drips. for a steady stream, use the camera.
+                for the most accurate count, use the camera and mic together: prop your phone up facing the tap, close
+                enough to hear the drops land. drippy learns the background for 2 seconds, then watches and listens for 30
+                seconds, longer for slow drips.
               </p>
               <div className="mt-4 grid grid-cols-1 gap-3 min-[400px]:grid-cols-2">
-                <Choice primary picture={<MicPic />} label={result ? "listen again" : "start listening"} hint="use the microphone" onClick={listen} />
-                <Choice picture={<CameraPic />} label="use camera" hint="watch the drops fall" onClick={watch} />
+                <div className="min-[400px]:col-span-2">
+                  <Choice
+                    primary
+                    picture={
+                      <span className="flex">
+                        <CameraPic />
+                        <MicPic className="-ml-2 h-10 w-10" />
+                      </span>
+                    }
+                    label={result ? "measure again: camera + mic" : "camera + mic"}
+                    hint="most accurate: every drop seen and heard"
+                    onClick={watchAndListen}
+                  />
+                </div>
+                <Choice picture={<MicPic />} label="mic only" hint="just listen" onClick={listen} />
+                <Choice picture={<CameraPic />} label="camera only" hint="just watch" onClick={watch} />
                 <Choice picture={<FingerPic />} label="tap manually" hint="tap along with each drop" onClick={startTapping} />
                 <Choice picture={<FilmPic />} label="test a recording" hint="check a video or audio file" onClick={() => reset("file")} />
               </div>
@@ -272,6 +331,7 @@ export default function App() {
               estimate={lowResult?.dropsPerMin ?? null}
               onCamera={watch}
               onListen={listen}
+              onBoth={watchAndListen}
               onTap={startTapping}
               onUseEstimate={() => setUseEstimate(true)}
             />
@@ -282,8 +342,9 @@ export default function App() {
               <div className="flex items-start gap-3">
                 <BottlePic className="h-12 w-12 shrink-0" />
                 <p className="text-sm">
-                  that's a steady stream, not drops, so it can't be counted drop by drop. measure it instead: hold a
-                  container under it, press start as the water hits it, and press full when it's full.
+                  that's a steady stream, not drops{streamNote ? ` (${streamNote})` : ""}, so it can't be counted drop by
+                  drop. measure it instead: hold a container under it, press start as the water hits it, and press full when
+                  it's full.
                 </p>
               </div>
               <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
@@ -313,7 +374,7 @@ export default function App() {
 
           <div
             className={
-              mode === "camera"
+              mode === "camera" || mode === "both"
                 ? `relative mb-3 overflow-hidden rounded-2xl border-[3px] border-water-deep ${aiming ? "cursor-crosshair" : ""}`
                 : "hidden"
             }
@@ -335,7 +396,7 @@ export default function App() {
             )}
           </div>
 
-          {mode === "camera" && aiming && (
+          {(mode === "camera" || mode === "both") && aiming && (
             <>
               <p className="text-xs text-water-deep">
                 point the camera at the tap so the drops fall through the picture. keep at least a hand's width of the fall
@@ -347,18 +408,21 @@ export default function App() {
             </>
           )}
 
-          {(mode === "mic" || (mode === "camera" && !aiming)) && (
+          {(mode === "mic" || ((mode === "camera" || mode === "both") && !aiming)) && (
             <>
               <canvas ref={session.canvasRef} className="block h-20 w-full rounded-xl border-2 border-water-light bg-sky-soft" />
               <div className="mt-3 flex items-center justify-between">
                 <span className="flex items-center gap-2">
                   <DropPic className="bob h-7 w-7" />
-                  <span className="text-2xl font-semibold tabular-nums text-water-deep">{live.matched.length}</span>
+                  <span className="text-2xl font-semibold tabular-nums text-water-deep">{liveDrops}</span>
                   <span className="text-sm">
-                    drop{live.matched.length === 1 ? "" : "s"}
+                    drop{liveDrops === 1 ? "" : "s"}
                     <span className="text-water-deep">
                       {" "}
-                      · {session.onsets.length} {mode === "mic" ? "drop-like sounds" : "falling objects"}
+                      ·{" "}
+                      {liveFused
+                        ? `${liveFused.fused.confirmed} seen + heard`
+                        : `${session.onsets.length} ${mode === "mic" ? "drop-like sounds" : "falling objects"}`}
                     </span>
                   </span>
                 </span>
@@ -425,10 +489,11 @@ export default function App() {
                     one drop every {((measured.intervalMs ?? 0) / 1000).toFixed(1)} s · {measured.confidence} confidence ·{" "}
                     {measured.drops} drops in a steady rhythm over {Math.round(measured.durationMs / 1000)} s from{" "}
                     {SOURCE_LABEL[measured.source]}
-                    {measured.events > measured.drops
+                    {measured.source !== "both" && measured.events > measured.drops
                       ? ` (${measured.events - measured.drops} other ${measured.source === "mic" ? "sounds" : "movements"} ignored)`
                       : ""}
                   </p>
+                  {"fused" in measured && <FusedSummary m={measured as Fused} />}
                 </>
               )}
               <BottleSimulation
@@ -581,6 +646,33 @@ export default function App() {
   );
 }
 
+/** how camera and mic agreed, under the drip rate */
+function FusedSummary({ m }: { m: Fused }) {
+  const f = m.fused;
+  const fmt = (x: Measurement) => (x.dropsPerMin === null || x.confidence === "low" ? "unsure" : `${formatRate(x.dropsPerMin)} / min`);
+  return (
+    <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
+      <div className="rounded-xl bg-leaf-light p-2">
+        <span className="block text-lg font-semibold text-leaf-deep">{f.confirmed}</span>
+        seen and heard
+      </div>
+      <div className="rounded-xl bg-sky p-2">
+        <span className="block text-lg font-semibold text-water-deep">{f.heardOnly}</span>
+        heard only, on the beat
+      </div>
+      <div className="rounded-xl bg-sky p-2">
+        <span className="block text-lg font-semibold text-water-deep">{f.seenOnly}</span>
+        seen only, on the beat
+      </div>
+      <p className="col-span-3 text-left text-water-deep">
+        sound alone: {fmt(f.sound)} · picture alone: {fmt(f.picture)}
+        {f.rates === "agree" ? " · they agree" : ""}
+        {f.lagMs !== null ? ` · each drop is heard ${Math.round(f.lagMs)} ms after it's seen` : ""}
+      </p>
+    </div>
+  );
+}
+
 function CupTimer({ startedAt }: { startedAt: number }) {
   const [now, setNow] = useState(() => performance.now());
   useEffect(() => {
@@ -663,7 +755,7 @@ function Choice({
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-3 rounded-2xl border-[3px] border-water-deep p-3 text-left shadow-chunky transition-transform hover:-translate-y-0.5 active:translate-y-1 active:shadow-none ${
+      className={`flex w-full items-center gap-3 rounded-2xl border-[3px] border-water-deep p-3 text-left shadow-chunky transition-transform hover:-translate-y-0.5 active:translate-y-1 active:shadow-none ${
         primary ? "bg-water-light" : "bg-white hover:bg-sky-soft"
       }`}
     >
@@ -758,6 +850,7 @@ function Fallback({
   estimate,
   onCamera,
   onListen,
+  onBoth,
   onTap,
   onUseEstimate,
 }: {
@@ -768,12 +861,15 @@ function Fallback({
   estimate: number | null;
   onCamera: () => void;
   onListen: () => void;
+  onBoth: () => void;
   onTap: () => void;
   onUseEstimate: () => void;
 }) {
   const text = blocked
     ? `${message}. ${from === "mic" ? "the camera can watch the drops instead." : "you can tap along with the drops instead."}`
-    : from === "mic"
+    : from === "both"
+      ? `couldn't confirm the drops with camera and mic together (${message}).`
+      : from === "mic"
       ? `couldn't count drops reliably from sound (${message}). the camera can watch the drops instead, and it can also spot a steady stream.`
       : from === "camera"
         ? `couldn't see drops clearly (${message}). make sure you tapped where the drops fall, add light, move closer, or tap along with the drops.`
@@ -802,6 +898,15 @@ function Fallback({
             </Button>
             <Button onClick={onCamera}>try camera again</Button>
             <Button onClick={onListen}>listen again</Button>
+          </>
+        )}
+        {from === "both" && (
+          <>
+            <Button primary onClick={onBoth}>
+              try again
+            </Button>
+            <Button onClick={onCamera}>camera only</Button>
+            <Button onClick={onListen}>mic only</Button>
           </>
         )}
         {from === "tap" && (

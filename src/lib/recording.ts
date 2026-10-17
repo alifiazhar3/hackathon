@@ -1,19 +1,25 @@
 import { AudioDropDetector } from "@/lib/audioDrips";
 import { analyze, type Measurement } from "@/lib/drips";
+import { fuse, fuseStream, type Fused } from "@/lib/fusion";
 import { VideoDropDetector } from "@/lib/videoDrips";
 
 /**
  * runs the same detectors used live on a saved recording, so a video of a
- * drip can be checked frame by frame and sample by sample
+ * drip can be checked frame by frame and sample by sample. a phone video's
+ * sound and picture are already in sync, so they're also combined.
  */
 
+export type SoundResult = { measurement: Measurement; heard: number[]; steady: boolean };
+export type PictureResult = { measurement: Measurement; seen: number[]; isStream: boolean };
+
 export type RecordingResult = {
-  sound: Measurement | null;
-  picture: { measurement: Measurement; isStream: boolean } | null;
+  sound: SoundResult | null;
+  picture: PictureResult | null;
+  combined: { measurement: Fused | null; stream: ReturnType<typeof fuseStream> } | null;
 };
 
 /** drops heard in the recording's sound track, or null if it has none */
-export async function analyzeSound(file: Blob): Promise<Measurement | null> {
+export async function analyzeSound(file: Blob): Promise<SoundResult | null> {
   let audio: AudioBuffer;
   try {
     const data = await file.arrayBuffer();
@@ -27,12 +33,20 @@ export async function analyzeSound(file: Blob): Promise<Measurement | null> {
     for (let i = 0; i < mono.length; i++) mono[i] += ch[i] / audio.numberOfChannels;
   }
   const detector = new AudioDropDetector(audio.sampleRate);
-  for (let i = 0; i < mono.length; i += 2048) detector.process(mono.subarray(i, i + 2048));
-  return analyze(
-    "mic",
-    detector.onsets.map((s) => s * 1000),
-    audio.duration * 1000,
-  );
+  // the steady-rush check looks at the last 2 s, so note it wherever it held for most of the clip
+  let steadyBlocks = 0;
+  let blocks = 0;
+  for (let i = 0; i < mono.length; i += 2048) {
+    detector.process(mono.subarray(i, i + 2048));
+    blocks++;
+    if (detector.steadyHiss) steadyBlocks++;
+  }
+  const heard = detector.onsets.map((s) => s * 1000);
+  return {
+    measurement: analyze("mic", heard, audio.duration * 1000),
+    heard,
+    steady: steadyBlocks > blocks * 0.4,
+  };
 }
 
 const FPS = 30;
@@ -46,7 +60,7 @@ export async function analyzePicture(
   video: HTMLVideoElement,
   column: number,
   onProgress: (share: number) => void,
-): Promise<RecordingResult["picture"]> {
+): Promise<PictureResult | null> {
   if (!video.videoWidth || !Number.isFinite(video.duration)) return null;
   const H = Math.round((WIDTH * video.videoHeight) / video.videoWidth);
   const canvas = document.createElement("canvas");
@@ -71,5 +85,16 @@ export async function analyzePicture(
   }
   onProgress(1);
   video.currentTime = 0;
-  return { measurement: analyze("camera", detector.onsets, video.duration * 1000), isStream: streamFrames > frames * 0.5 };
+  return {
+    measurement: analyze("camera", detector.onsets, video.duration * 1000),
+    seen: [...detector.onsets],
+    isStream: streamFrames > frames * 0.5,
+  };
+}
+
+/** sound and picture together, when the recording has both */
+export function combine(sound: SoundResult | null, picture: PictureResult | null, durationMs: number): RecordingResult["combined"] {
+  if (!sound || !picture) return null;
+  const stream = fuseStream(picture.isStream, sound.steady);
+  return { measurement: stream.stream ? null : fuse(picture.seen, sound.heard, durationMs), stream };
 }

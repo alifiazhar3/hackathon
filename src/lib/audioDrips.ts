@@ -83,6 +83,19 @@ const NOISE_FALL_SEC = 0.3;
 const NOISE_RISE_SEC = 3;
 const HISTORY = 8;
 
+/**
+ * a steady stream sounds like an even rush of noise with no separate plinks.
+ * a fan sounds similar, so this only backs up what the camera sees.
+ */
+const HISS_BLOCK_SEC = 0.05;
+const HISS_WINDOW_BLOCKS = 40;
+/** loudness must stay within this spread (relative to its average) over the window */
+const HISS_MAX_SPREAD = 0.35;
+/** and be clearly above silence (energy in the 1–6 khz band, about −60 dB) */
+const HISS_MIN_ENERGY = 1e-6;
+/** a dripping tap plinks; a stream doesn't */
+const HISS_MAX_PLINKS = 1;
+
 type Candidate = { start: number; peak: number; peakFrame: number; prev: number; band: number; full: number };
 
 export class AudioDropDetector {
@@ -109,6 +122,11 @@ export class AudioDropDetector {
   readonly onsets: number[] = [];
   /** latest level above the background, in db (for display) */
   level = 0;
+  private hissAcc = 0;
+  private hissCount = 0;
+  private hissBlocks: number[] = [];
+  /** whether the last two seconds sounded like a steady stream (or another steady rush, like a fan) */
+  steadyHiss = false;
   /** sounds that started like a drop but were rejected, and why (for tuning) */
   readonly rejected: { t: number; why: string }[] = [];
 
@@ -148,7 +166,24 @@ export class AudioDropDetector {
     }
   }
 
+  private trackHiss(energy: number) {
+    this.hissAcc += energy;
+    if (++this.hissCount * FRAME_SEC < HISS_BLOCK_SEC) return;
+    this.hissBlocks.push(this.hissAcc / this.hissCount);
+    this.hissAcc = 0;
+    this.hissCount = 0;
+    if (this.hissBlocks.length > HISS_WINDOW_BLOCKS) this.hissBlocks.shift();
+    if (this.hissBlocks.length < HISS_WINDOW_BLOCKS) return;
+    const mean = this.hissBlocks.reduce((a, b) => a + b, 0) / this.hissBlocks.length;
+    const sd = Math.sqrt(this.hissBlocks.reduce((a, b) => a + (b - mean) ** 2, 0) / this.hissBlocks.length);
+    const now = this.frame * FRAME_SEC;
+    const windowSec = HISS_WINDOW_BLOCKS * HISS_BLOCK_SEC;
+    const plinks = this.onsets.filter((t) => t > now - windowSec).length;
+    this.steadyHiss = mean >= HISS_MIN_ENERGY && sd / mean <= HISS_MAX_SPREAD && plinks <= HISS_MAX_PLINKS;
+  }
+
   private onFrame(energy: number) {
+    this.trackHiss(energy);
     const t = this.frame * FRAME_SEC;
     const k = this.frame++;
 

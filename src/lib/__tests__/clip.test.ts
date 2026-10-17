@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { AudioDropDetector } from "@/lib/audioDrips";
 import { analyze } from "@/lib/drips";
 import { VideoDropDetector } from "@/lib/videoDrips";
+import { fuse } from "@/lib/fusion";
 
 /**
  * a real 11.6 s recording of a dripping tap (test-media/water-dripping-sound-effect.mp4),
@@ -73,6 +74,19 @@ describe.skipIf(!haveClip)("real dripping-tap recording", () => {
       expect(Math.abs(m.dropsPerMin! - 101) / 101).toBeLessThan(0.02);
     });
   }
+
+  it("camera + mic together notice that this clip's sound and picture are different takes", () => {
+    const bytes = gunzipSync(readFileSync(AUDIO));
+    const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+    const samples = Float32Array.from(pcm, (x) => x / 32767);
+    const heard = new AudioDropDetector(16000);
+    for (let i = 0; i < samples.length; i += 2048) heard.process(samples.subarray(i, i + 2048));
+    const seen = new VideoDropDetector(W, H, 0.45);
+    frames.forEach((f, i) => seen.push(f, (i * 1000) / FPS));
+    const m = fuse(seen.onsets, heard.onsets.map((s) => s * 1000), (frames.length * 1000) / FPS);
+    expect(m.fused.rates).toBe("disagree");
+    expect(m.confidence).toBe("low");
+  });
 
   it("the camera sees nothing when tapped away from the drops", () => {
     const detector = new VideoDropDetector(W, H, 0.85);

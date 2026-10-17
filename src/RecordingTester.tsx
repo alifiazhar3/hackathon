@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { formatRate, type Measurement } from "@/lib/drips";
-import { analyzePicture, analyzeSound, type RecordingResult } from "@/lib/recording";
+import { analyzePicture, analyzeSound, combine, type RecordingResult } from "@/lib/recording";
 import { COLUMN_HALF_WIDTH } from "@/lib/samplers";
 
 type Phase = "pick" | "aim" | "checking" | "done";
@@ -28,7 +28,7 @@ export function RecordingTester({
   const [column, setColumn] = useState(0.5);
   const [progress, setProgress] = useState(0);
   const [step, setStep] = useState("");
-  const [result, setResult] = useState<RecordingResult>({ sound: null, picture: null });
+  const [result, setResult] = useState<RecordingResult>({ sound: null, picture: null, combined: null });
 
   useEffect(() => () => {
     if (url) URL.revokeObjectURL(url);
@@ -39,7 +39,7 @@ export function RecordingTester({
     if (url) URL.revokeObjectURL(url);
     setFile(f);
     setUrl(URL.createObjectURL(f));
-    setResult({ sound: null, picture: null });
+    setResult({ sound: null, picture: null, combined: null });
     setPhase("aim");
   }
 
@@ -54,7 +54,8 @@ export function RecordingTester({
       setStep("checking the picture, frame by frame…");
       picture = await analyzePicture(videoRef.current, col, setProgress);
     }
-    setResult({ sound, picture });
+    const durationMs = (videoRef.current?.duration ?? 0) * 1000;
+    setResult({ sound, picture, combined: combine(sound, picture, durationMs) });
     setPhase("done");
   }
 
@@ -77,7 +78,7 @@ export function RecordingTester({
     void check(x);
   }
 
-  const { sound, picture } = result;
+  const { sound, picture, combined } = result;
   const usable = (m: Measurement | null | undefined) => !!m && m.dropsPerMin !== null && m.confidence !== "low";
 
   return (
@@ -146,9 +147,21 @@ export function RecordingTester({
         <div className="space-y-4">
           <table className="w-full text-sm">
             <tbody>
+              {combined && (
+                <tr className="border-b border-water-light/50">
+                  <td className="py-2 pr-3 font-semibold text-water-deep">camera + mic</td>
+                  <td className="py-2 font-semibold">
+                    {combined.stream.stream
+                      ? `a steady stream (${combined.stream.note})`
+                      : combined.measurement
+                        ? `${describe(combined.measurement)} · ${combined.measurement.fused.confirmed} seen and heard`
+                        : "nothing to check"}
+                  </td>
+                </tr>
+              )}
               <tr className="border-b border-water-light/50">
                 <td className="py-2 pr-3 text-water-deep">sound</td>
-                <td className="py-2">{describe(sound)}</td>
+                <td className="py-2">{describe(sound?.measurement ?? null)}</td>
               </tr>
               <tr className="border-b border-water-light/50">
                 <td className="py-2 pr-3 text-water-deep">picture</td>
@@ -159,12 +172,21 @@ export function RecordingTester({
             </tbody>
           </table>
           <p className="text-xs text-water-deep">
-            if the sound and picture disagree, the clip's sound may have been added separately; trust the one that matches
-            what you see.
+            camera + mic is the most accurate when the sound and picture were recorded together. if they disagree, the
+            clip's sound may have been added separately; trust the one that matches what you see.
           </p>
           <div className="flex flex-wrap gap-2">
-            {usable(sound) && (
-              <button type="button" onClick={() => onUse(sound!)} className="rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink">
+            {combined?.measurement && usable(combined.measurement) && (
+              <button
+                type="button"
+                onClick={() => onUse(combined.measurement!)}
+                className="rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink"
+              >
+                use camera + mic
+              </button>
+            )}
+            {usable(sound?.measurement) && (
+              <button type="button" onClick={() => onUse(sound!.measurement)} className="rounded-full border-[3px] border-water-deep bg-white px-5 py-2 text-sm font-medium text-water-deep hover:bg-sky">
                 use the sound result
               </button>
             )}
@@ -172,12 +194,12 @@ export function RecordingTester({
               <button
                 type="button"
                 onClick={() => onUse(picture.measurement)}
-                className="rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink"
+                className="rounded-full border-[3px] border-water-deep bg-white px-5 py-2 text-sm font-medium text-water-deep hover:bg-sky"
               >
                 use the picture result
               </button>
             )}
-            {picture?.isStream && (
+            {(picture?.isStream || combined?.stream.stream) && (
               <button type="button" onClick={onStream} className="rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink">
                 measure the stream
               </button>

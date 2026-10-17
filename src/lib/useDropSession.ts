@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Trace } from "@/lib/detect";
-import type { Sampler, SamplerStatus } from "@/lib/samplers";
+import type { Channels, Sampler, SamplerStatus } from "@/lib/samplers";
 import type { Source } from "@/lib/drips";
 
 /** a steady stream must be seen this long before measuring stops */
@@ -13,7 +13,7 @@ type Options = {
   maxMs: number;
   /** detections needed before stopping at minMs */
   minDrops: number;
-  onDone: (source: Source, onsets: number[], durationMs: number, stream: boolean) => void;
+  onDone: (source: Source, onsets: number[], durationMs: number, stream: boolean, channels: Channels | null) => void;
 };
 
 /** runs a sampler, collects drop times and draws the live trace */
@@ -22,6 +22,7 @@ export function useDropSession(options: Options) {
   const [elapsed, setElapsed] = useState(0);
   const [onsets, setOnsets] = useState<number[]>([]);
   const [status, setStatus] = useState<SamplerStatus>("calibrating");
+  const [channels, setChannels] = useState<Channels | null>(null);
 
   const optionsRef = useRef(options);
   optionsRef.current = options;
@@ -45,8 +46,9 @@ export function useDropSession(options: Options) {
     if (!samplerRef.current) return;
     const duration = performance.now() - t0Ref.current;
     const stream = samplerRef.current.status() === "stream";
+    const finalChannels = samplerRef.current.channels?.() ?? null;
     cancel();
-    optionsRef.current.onDone(sourceRef.current, [...onsetsRef.current], duration, stream);
+    optionsRef.current.onDone(sourceRef.current, [...onsetsRef.current], duration, stream, finalChannels);
   }, [cancel]);
 
   const start = useCallback(
@@ -60,6 +62,7 @@ export function useDropSession(options: Options) {
       t0Ref.current = performance.now();
       setElapsed(0);
       setOnsets([]);
+      setChannels(null);
       setStatus(sampler.status());
       setRunning(true);
 
@@ -79,7 +82,10 @@ export function useDropSession(options: Options) {
           lastUiUpdate = t;
           setElapsed(t);
           setStatus(st);
-          if (fresh.length) setOnsets([...onsetsRef.current]);
+          if (fresh.length) {
+            setOnsets([...onsetsRef.current]);
+            setChannels(sampler.channels?.() ?? null);
+          }
         }
 
         const { minMs, maxMs, minDrops } = optionsRef.current;
@@ -97,5 +103,5 @@ export function useDropSession(options: Options) {
 
   useEffect(() => cancel, [cancel]);
 
-  return { running, elapsed, onsets, status, canvasRef, start, finish, cancel };
+  return { running, elapsed, onsets, channels, status, canvasRef, start, finish, cancel };
 }
