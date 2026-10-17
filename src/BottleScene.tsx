@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Edges, OrbitControls } from "@react-three/drei";
+import { Edges, Html, OrbitControls } from "@react-three/drei";
 import { DoubleSide, LatheGeometry, Vector2, type Mesh, type MeshBasicMaterial } from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
+import { groupLabel, TIER_SCALE, type BottleGroup } from "@/lib/bottles";
 import { FALL_MS, RIPPLE_MS, type LiveDrop } from "@/lib/useLiveDrops";
 
 const INK = "#171717";
@@ -145,32 +146,75 @@ function Drop({ spawnedAt, surfaceY }: { spawnedAt: number; surfaceY: number }) 
   );
 }
 
-/** points the camera at the rows whenever their size changes */
-function Framing({ cols, rows, controls }: { cols: number; rows: number; controls: React.RefObject<OrbitControlsImpl> }) {
+/** most bottles of one size side by side before starting another row */
+const PER_ROW = 10;
+
+type Placed = { key: string; fill: number; scale: number; position: [number, number, number] };
+type RowLabel = { key: string; text: string; position: [number, number, number] };
+
+/** lays bottle sizes out in rows: normal bottles at the front, the biggest at the back */
+function layout(groups: BottleGroup[]) {
+  const bottles: Placed[] = [];
+  const labels: RowLabel[] = [];
+  let z = 0;
+  let width = 0;
+  let maxHeight = 1;
+  const frontToBack = [...groups].sort((a, b) => a.size - b.size);
+  frontToBack.forEach((g, gi) => {
+    const scale = TIER_SCALE[g.size] ?? 1;
+    const spacing = SPACING * scale;
+    const rows = Math.ceil(g.fills.length / PER_ROW);
+    if (gi > 0) z -= spacing / 2 + 0.25;
+    for (let r = 0; r < rows; r++) {
+      const inRow = g.fills.slice(r * PER_ROW, (r + 1) * PER_ROW);
+      const rowWidth = (inRow.length - 1) * spacing;
+      width = Math.max(width, rowWidth + spacing);
+      inRow.forEach((fill, i) => {
+        bottles.push({ key: `${g.size}-${r}-${i}`, fill, scale, position: [i * spacing - rowWidth / 2, 0, z] });
+      });
+      if (r === 0) labels.push({ key: String(g.size), text: groupLabel(g), position: [-rowWidth / 2 - spacing * 0.6, 0.15, z] });
+      if (r < rows - 1) z -= spacing;
+    }
+    z -= spacing / 2;
+    maxHeight = Math.max(maxHeight, scale);
+  });
+  return { bottles, labels, width, depth: -z, maxHeight };
+}
+
+/** points the camera at the bottles whenever the layout changes */
+function Framing({
+  width,
+  depth,
+  height,
+  controls,
+}: {
+  width: number;
+  depth: number;
+  height: number;
+  controls: React.RefObject<OrbitControlsImpl>;
+}) {
   const camera = useThree((s) => s.camera);
   useEffect(() => {
-    const depth = (rows - 1) * SPACING;
-    const width = (cols - 1) * SPACING;
     const centerZ = (LIVE_Z - depth) / 2;
-    const dist = Math.max(4.2, Math.max(width, depth + LIVE_Z) * 1.8);
-    camera.position.set(dist * 0.5, dist * 0.75, centerZ + dist * 0.8);
+    const dist = Math.max(4.2, Math.max(width, depth + LIVE_Z, height * 1.5) * 1.6);
+    camera.position.set(dist * 0.5, dist * 0.7, centerZ + dist * 0.8);
     const c = controls.current;
     if (c) {
-      c.target.set(0, 0.45, centerZ);
+      c.target.set(0, Math.min(1.5, height * 0.35), centerZ);
       c.update();
       c.saveState();
     }
-  }, [cols, rows, camera, controls]);
+  }, [width, depth, height, camera, controls]);
   return null;
 }
 
 export default function BottleScene({
-  fills,
+  groups,
   liveFill,
   drops,
   stream,
 }: {
-  fills: number[];
+  groups: BottleGroup[];
   liveFill: number;
   drops: LiveDrop[];
   stream: boolean;
@@ -178,8 +222,7 @@ export default function BottleScene({
   const controls = useRef<OrbitControlsImpl>(null);
   const [spinning, setSpinning] = useState(() => !window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
-  const cols = Math.min(10, Math.max(1, Math.ceil(Math.sqrt(fills.length * 1.6))));
-  const rows = Math.ceil(fills.length / cols);
+  const { bottles, labels, width, depth, maxHeight } = useMemo(() => layout(groups), [groups]);
   const surfaceY = Math.max(0.01, liveFill * WATER_MAX);
 
   return (
@@ -195,11 +238,16 @@ export default function BottleScene({
         </mesh>
         <gridHelper args={[40, 80, "#e5e5e5", "#efefef"]} />
 
-        {fills.map((f, i) => {
-          const col = i % cols;
-          const row = Math.floor(i / cols);
-          return <Bottle3D key={i} fill={f} position={[(col - (cols - 1) / 2) * SPACING, 0, -row * SPACING]} />;
-        })}
+        {bottles.map((b) => (
+          <group key={b.key} position={b.position} scale={b.scale}>
+            <Bottle3D fill={b.fill} position={[0, 0, 0]} />
+          </group>
+        ))}
+        {labels.map((l) => (
+          <Html key={l.key} position={l.position} center zIndexRange={[10, 0]}>
+            <span className="pointer-events-none whitespace-nowrap bg-white/80 px-1 text-[11px] text-neutral-600">{l.text}</span>
+          </Html>
+        ))}
 
         <Tap />
         <Bottle3D fill={liveFill} position={[0, 0, LIVE_Z]} cap={false} />
@@ -223,7 +271,7 @@ export default function BottleScene({
           maxPolarAngle={Math.PI / 2 - 0.05}
           onStart={() => setSpinning(false)}
         />
-        <Framing cols={cols} rows={rows} controls={controls} />
+        <Framing width={width} depth={depth} height={maxHeight} controls={controls} />
       </Canvas>
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 p-2">

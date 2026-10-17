@@ -1,15 +1,22 @@
+import { findRhythm, tolerance } from "@/lib/rhythm";
+
 export type Source = "mic" | "camera" | "tap";
 export type Confidence = "high" | "medium" | "low";
 export type Unit = "gal" | "l";
 
 export type Measurement = {
   source: Source;
+  /** detected events that fit the drip rhythm */
   drops: number;
+  /** everything the detector picked up, drops or not */
+  events: number;
   durationMs: number;
   dropsPerMin: number | null;
   intervalMs: number | null;
   confidence: Confidence;
   reason: string | null;
+  /** set when the leak is a steady stream, measured by timing how long it takes to fill a container */
+  stream?: { containerMl: number; seconds: number; mlPerMin: number };
 };
 
 /** volume of one faucet drop, as assumed by the usgs drip calculator */
@@ -25,47 +32,99 @@ export const PERIODS: [label: string, days: number][] = [
   ["year", 365],
 ];
 
-function median(xs: number[]) {
-  const s = [...xs].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+const EVENT_WORD: Record<Source, string> = { mic: "sounds", camera: "falling objects", tap: "taps" };
+
+/**
+ * whether a rhythm this strong could come from randomly timed events: the same
+ * number of events are scattered at random many times, and the real rhythm
+ * has to beat every one of those
+ */
+function beatsChance(score: number, events: number, durationMs: number) {
+  let seed = 12345;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  for (let k = 0; k < 20; k++) {
+    const shuffled = Array.from({ length: events }, () => random() * durationMs);
+    if (findRhythm(shuffled).score >= score) return false;
+  }
+  return true;
 }
 
-/** turns drop timestamps (ms) into a rate and a confidence level */
+/** turns detected event times (ms) into a drip rate and a confidence level */
 export function analyze(source: Source, onsets: number[], durationMs: number): Measurement {
-  const drops = onsets.length;
-  const base = { source, drops, durationMs };
+  const events = onsets.length;
+  const rhythm = findRhythm(onsets);
+  const drops = rhythm.matched.length;
+  const base = { source, drops, events, durationMs };
 
-  if (drops < 3) {
+  if (rhythm.intervalMs === null) {
     return {
       ...base,
       dropsPerMin: null,
       intervalMs: null,
       confidence: "low",
-      reason: drops === 0 ? "no drops detected" : `only ${drops} drop${drops === 1 ? "" : "s"} detected`,
+      reason:
+        events === 0
+          ? source === "camera"
+            ? "no falling drops seen"
+            : "no drops detected"
+          : events < 3
+            ? `only ${events} ${EVENT_WORD[source]} detected`
+            : `no steady drip rhythm among the ${events} ${EVENT_WORD[source]} detected`,
     };
   }
 
-  const intervals = onsets.slice(1).map((t, i) => t - onsets[i]);
-  const intervalMs = median(intervals);
-  // robust spread of the gaps between drops, relative to the typical gap
-  const spread = (median(intervals.map((x) => Math.abs(x - intervalMs))) * 1.4826) / intervalMs;
+  // share of the drops the rhythm predicts that were actually detected
+  const coverage = drops / rhythm.expected;
+  // how often a random event would land on a predicted drop by luck alone
+  const eventsPerMs = events / Math.max(durationMs, 1);
+  const chance = 1 - Math.exp(-eventsPerMs * 2 * tolerance(rhythm.intervalMs, 1));
+  const minDrops = source === "tap" ? 4 : 5;
+
+  const span = Math.max(durationMs, onsets.length ? Math.max(...onsets) - Math.min(...onsets) : 0);
+  const random = drops < events && !beatsChance(rhythm.score, events, span);
 
   let confidence: Confidence = "low";
-  if (drops >= 6 && spread < 0.25) confidence = "high";
-  else if (drops >= 4 && spread < 0.5) confidence = "medium";
+  if (random) confidence = "low";
+  else if (drops >= 6 && coverage >= Math.max(0.7, chance + 0.45) && rhythm.jitter <= 0.08) confidence = "high";
+  else if (drops >= minDrops && coverage >= Math.max(0.55, chance + 0.35) && rhythm.jitter <= 0.15) confidence = "medium";
 
   return {
     ...base,
-    dropsPerMin: 60000 / intervalMs,
-    intervalMs,
+    dropsPerMin: 60000 / rhythm.intervalMs,
+    intervalMs: rhythm.intervalMs,
     confidence,
     reason:
       confidence !== "low"
         ? null
-        : drops < 4
-          ? `only ${drops} drops detected`
-          : "the timing between sounds was irregular, so some may not be drops",
+        : random
+          ? `the ${EVENT_WORD[source]} detected were randomly timed, not a steady drip`
+          : drops < minDrops
+          ? `only ${drops} ${EVENT_WORD[source]} fit a steady rhythm`
+          : `the ${EVENT_WORD[source]} detected didn't keep a steady rhythm`,
+  };
+}
+
+/**
+ * a steady stream can't be counted drop by drop, so it is measured by filling
+ * a container. the flow is expressed as the equivalent drops per minute so the
+ * cost math works the same way.
+ */
+export function streamMeasurement(containerMl: number, seconds: number): Measurement {
+  const mlPerMin = (containerMl / seconds) * 60;
+  const dropsPerMin = mlPerMin / DROP_ML;
+  return {
+    source: "camera",
+    drops: 0,
+    events: 0,
+    durationMs: seconds * 1000,
+    dropsPerMin,
+    intervalMs: 60000 / dropsPerMin,
+    confidence: "high",
+    reason: null,
+    stream: { containerMl, seconds, mlPerMin },
   };
 }
 

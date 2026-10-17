@@ -1,62 +1,12 @@
-export type DetectorOptions = {
-  /** how many times above the background level a spike must be */
-  ratio: number;
-  /** minimum absolute rise above the background level */
-  minDelta: number;
-  /** ignore new spikes this soon after a drop (echoes, splashes) */
-  refractoryMs: number;
-  /** time spent learning the background level before counting */
-  warmupMs: number;
-};
-
-/**
- * finds short spikes in a stream of levels (mic loudness or camera motion).
- * the background level adapts slowly, so steady noise doesn't count as drops.
- */
-export class OnsetDetector {
-  private floor = 0;
-  private startedAt = -1;
-  private armed = true;
-  private lastHit = -Infinity;
-
-  constructor(private o: DetectorOptions) {}
-
-  threshold() {
-    return this.floor * this.o.ratio + this.o.minDelta;
-  }
-
-  push(value: number, t: number): boolean {
-    if (this.startedAt < 0) {
-      this.startedAt = t;
-      this.floor = value;
-    }
-    const warm = t - this.startedAt < this.o.warmupMs;
-    const th = this.threshold();
-
-    let hit = false;
-    if (!warm && this.armed && value > th && t - this.lastHit >= this.o.refractoryMs) {
-      hit = true;
-      this.lastHit = t;
-      this.armed = false;
-    }
-    // re-arm only once the level has dropped back down (hysteresis)
-    if (value < this.floor + (th - this.floor) * 0.5) this.armed = true;
-    // spikes don't raise the background level; it falls faster than it rises
-    if (warm || value < th) this.floor += (value - this.floor) * (value > this.floor ? 0.01 : 0.05);
-
-    return hit;
-  }
-}
-
 /** rolling history of levels, drawn as a trace with a tick per detected drop */
 export class Trace {
   private values: number[] = [];
-  private thresholds: number[] = [];
+  private thresholds: (number | null)[] = [];
   private hits: boolean[] = [];
 
   constructor(private size = 300) {}
 
-  push(value: number, threshold: number, hit: boolean) {
+  push(value: number, threshold: number | null, hit: boolean) {
     this.values.push(value);
     this.thresholds.push(threshold);
     this.hits.push(hit);
@@ -83,7 +33,7 @@ export class Trace {
 
     let max = 1e-6;
     for (let i = 0; i < this.values.length; i++) {
-      max = Math.max(max, this.values[i], this.thresholds[i] * 1.5);
+      max = Math.max(max, this.values[i], (this.thresholds[i] ?? 0) * 1.5);
     }
     const step = w / (this.size - 1);
     const offset = this.size - this.values.length;
@@ -98,10 +48,17 @@ export class Trace {
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
+    let drawing = false;
     this.thresholds.forEach((v, i) => {
       const x = (offset + i) * step;
-      if (i === 0) ctx.moveTo(x, y(v));
-      else ctx.lineTo(x, y(v));
+      if (v === null) {
+        drawing = false;
+      } else if (drawing) {
+        ctx.lineTo(x, y(v));
+      } else {
+        ctx.moveTo(x, y(v));
+        drawing = true;
+      }
     });
     ctx.stroke();
 

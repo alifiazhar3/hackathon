@@ -1,4 +1,5 @@
-import { Component, lazy, Suspense, useId, useState, type CSSProperties, type ReactNode } from "react";
+import { Component, lazy, Suspense, useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { bottleGroups, groupLabel, type BottleGroup } from "@/lib/bottles";
 import { DROP_ML, formatDuration, PERIODS } from "@/lib/drips";
 import { FALL_MS, RIPPLE_MS, useLiveDrops, type LiveDrop } from "@/lib/useLiveDrops";
 
@@ -6,8 +7,6 @@ const BottleScene = lazy(() => import("@/BottleScene"));
 
 export const BOTTLE_ML = 473;
 export const DROPS_PER_BOTTLE = BOTTLE_ML / DROP_ML;
-/** most bottles shown before each one stands for 10, 100, ... bottles */
-const MAX_ICONS = 50;
 
 const PERIOD_OPTIONS = PERIODS.filter(([label]) => label !== "week");
 
@@ -41,12 +40,22 @@ class SceneBoundary extends Component<{ fallback: ReactNode; children: ReactNode
   }
 }
 
-function Bottle({ fill, cap = true, className }: { fill: number; cap?: boolean; className?: string }) {
+function Bottle({
+  fill,
+  cap = true,
+  className,
+  style,
+}: {
+  fill: number;
+  cap?: boolean;
+  className?: string;
+  style?: CSSProperties;
+}) {
   const clipId = useId();
   const y = waterY(fill);
   return (
     // explicit size so it also works nested inside another svg
-    <svg viewBox="0 0 40 100" width={40} height={100} className={className} aria-hidden="true">
+    <svg viewBox="0 0 40 100" width={40} height={100} className={className} style={style} aria-hidden="true">
       <defs>
         <clipPath id={clipId}>
           <path d={BOTTLE_BODY} />
@@ -132,12 +141,22 @@ function FlatLiveBottle({ drops, stream, fill }: { drops: LiveDrop[]; stream: bo
   );
 }
 
-/** flat fallback: a wrapping row of bottle icons */
-function FlatGrid({ fills }: { fills: number[] }) {
+/** height of each bottle size in the flat view, in px */
+const FLAT_HEIGHT: Record<number, number> = { 1: 32, 10: 44, 100: 60, 1_000: 80, 10_000: 104, 100_000: 132 };
+
+/** flat fallback: one row per bottle size, biggest first */
+function FlatGrid({ groups }: { groups: BottleGroup[] }) {
   return (
-    <div className="flex flex-wrap gap-1">
-      {fills.map((f, i) => (
-        <Bottle key={i} fill={f} className="h-12 w-5" />
+    <div className="flex flex-wrap items-end gap-x-6 gap-y-4">
+      {groups.map((g) => (
+        <div key={g.size}>
+          <div className="flex flex-wrap items-end gap-1">
+            {g.fills.map((f, i) => (
+              <Bottle key={i} fill={f} className="w-auto" style={{ height: FLAT_HEIGHT[g.size] }} />
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-neutral-500">{groupLabel(g)}</p>
+        </div>
       ))}
     </div>
   );
@@ -147,10 +166,13 @@ export function BottleSimulation({
   dropsPerMin,
   intervalMs,
   litersPerDay,
+  stream: isStream = false,
 }: {
   dropsPerMin: number;
   intervalMs: number;
   litersPerDay: number;
+  /** the leak is a steady stream rather than drops */
+  stream?: boolean;
 }) {
   const [period, setPeriod] = useState("year");
   const [webgl] = useState(hasWebGL);
@@ -163,16 +185,12 @@ export function BottleSimulation({
 
   const days = PERIOD_OPTIONS.find(([label]) => label === period)?.[1] ?? 1;
   const bottles = (litersPerDay * 1000 * days) / BOTTLE_ML;
-  const perIcon = bottles > MAX_ICONS ? 10 ** Math.ceil(Math.log10(bottles / MAX_ICONS)) : 1;
-  const icons = bottles / perIcon;
-  const full = Math.floor(icons);
-  const partial = icons - full;
-  const fills = [...Array(full).fill(1), ...(partial > 0.01 || full === 0 ? [partial] : [])];
+  const groups = useMemo(() => bottleGroups(bottles), [bottles]);
 
   const flat = (
     <div className="space-y-6">
       <FlatLiveBottle drops={drops} stream={stream} fill={liveFill} />
-      <FlatGrid fills={fills} />
+      <FlatGrid groups={groups} />
     </div>
   );
 
@@ -199,7 +217,7 @@ export function BottleSimulation({
       {webgl ? (
         <SceneBoundary fallback={flat}>
           <Suspense fallback={<div className="h-80 border border-neutral-200 sm:h-96" />}>
-            <BottleScene fills={fills} liveFill={liveFill} drops={drops} stream={stream} />
+            <BottleScene groups={groups} liveFill={liveFill} drops={drops} stream={stream} />
           </Suspense>
         </SceneBoundary>
       ) : (
@@ -207,8 +225,8 @@ export function BottleSimulation({
       )}
 
       <p className="mt-2 text-xs text-neutral-500">
-        {perIcon > 1 ? `each bottle = ${perIcon.toLocaleString("en-US")} bottles · ` : ""}
-        {BOTTLE_ML} ml (about 2 cups) per bottle
+        {groups.map(groupLabel).join(" + ")}. a normal bottle is {BOTTLE_ML} ml
+        (about 2 cups); each bigger size stands for 10× the one before it, up to 100,000.
       </p>
 
       <div className="mt-4 text-sm">
@@ -219,7 +237,9 @@ export function BottleSimulation({
           {bottlesDone > 0 ? `${bottlesDone} bottle${bottlesDone === 1 ? "" : "s"} filled so far. ` : ""}
           fills one bottle every{" "}
           {minutesPerBottle < 60 ? `${Math.max(1, Math.round(minutesPerBottle))} min` : formatDuration(minutesPerBottle / 1440)}.{" "}
-          {stream
+          {isStream
+            ? "real time: a steady stream."
+            : stream
             ? `real time: about ${Math.round(dropsPerMin / 60)} drops a second, too fast to see one by one.`
             : `real time: one drop every ${(intervalMs / 1000).toFixed(1)} s.`}
         </p>

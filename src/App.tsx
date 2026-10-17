@@ -1,6 +1,7 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
   analyze,
+  streamMeasurement,
   FIX_HORIZON_DAYS,
   formatDuration,
   formatMoney,
@@ -13,7 +14,8 @@ import {
   type Source,
   type Unit,
 } from "@/lib/drips";
-import { CAMERA_DETECTOR, CAMERA_ROI, cameraSampler, MIC_DETECTOR, micSampler } from "@/lib/samplers";
+import { cameraSampler, COLUMN_HALF_WIDTH, micSampler, openCamera, type SamplerStatus } from "@/lib/samplers";
+import { findRhythm } from "@/lib/rhythm";
 import { useDropSession } from "@/lib/useDropSession";
 import { BottleSimulation } from "@/BottleSimulation";
 
@@ -21,6 +23,14 @@ type Mode = "idle" | "mic" | "camera" | "tap";
 type RepairKind = "diy" | "plumber";
 
 const SOURCE_LABEL: Record<Source, string> = { mic: "sound", camera: "camera", tap: "taps" };
+
+const STATUS_TEXT: Record<SamplerStatus, string> = {
+  calibrating: "learning the background first (2 s). keep things as they are.",
+  listening: "listening. each blue tick is a sound shaped like a drop; only ones that keep a steady rhythm count.",
+  watching: "watching the blue column. a drop counts only when something small falls straight down it and speeds up.",
+  unsteady: "the whole picture is moving. hold the camera still or rest it on something.",
+  stream: "that looks like a steady stream, not drops. checking for a few seconds…",
+};
 
 function errorText(e: unknown) {
   if (e instanceof DOMException && e.name === "NotAllowedError") return "access was blocked";
@@ -46,29 +56,51 @@ export default function App() {
   const [repairCosts, setRepairCosts] = useState<Record<RepairKind, string>>({ diy: "15", plumber: "200" });
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  /** turns the camera off while it is open for aiming but not yet counting */
+  const closeCameraRef = useRef<(() => void) | null>(null);
+  const [aiming, setAiming] = useState(false);
+  const [column, setColumn] = useState(0.5);
+
+  // a steady stream is measured by timing how long it takes to fill a container
+  const [streamFound, setStreamFound] = useState(false);
+  const [cupMl, setCupMl] = useState("473");
+  const [cupStartedAt, setCupStartedAt] = useState<number | null>(null);
 
   const session = useDropSession({
     minMs: 30000,
     maxMs: 90000,
     minDrops: 6,
-    onDone: (source, onsets, durationMs) => {
+    onDone: (source, onsets, durationMs, stream) => {
       setMode("idle");
-      setResult(analyze(source, onsets, durationMs));
+      if (stream) setStreamFound(true);
+      else setResult(analyze(source, onsets, durationMs));
     },
   });
 
+  // drops so far that fit a steady rhythm (sounds that don't fit are ignored)
+  const live = useMemo(() => findRhythm(session.onsets), [session.onsets]);
+
+  function closeCamera() {
+    closeCameraRef.current?.();
+    closeCameraRef.current = null;
+  }
+
   function reset(next: Mode) {
     session.cancel();
+    closeCamera();
+    setAiming(false);
     setResult(null);
     setUseEstimate(false);
     setFailure(null);
+    setStreamFound(false);
+    setCupStartedAt(null);
     setMode(next);
   }
 
   async function listen() {
     reset("mic");
     try {
-      session.start(await micSampler(), "mic", MIC_DETECTOR);
+      session.start(await micSampler(), "mic");
     } catch (e) {
       setMode("idle");
       setFailure({ source: "mic", message: `microphone unavailable: ${errorText(e)}` });
@@ -78,11 +110,34 @@ export default function App() {
   async function watch() {
     reset("camera");
     try {
-      session.start(await cameraSampler(videoRef.current!), "camera", CAMERA_DETECTOR);
+      closeCameraRef.current = await openCamera(videoRef.current!);
+      setAiming(true);
     } catch (e) {
       setMode("idle");
       setFailure({ source: "camera", message: `camera unavailable: ${errorText(e)}` });
     }
+  }
+
+  /** the user taps the video where the drops fall; counting starts there */
+  function aimAt(e: MouseEvent<HTMLDivElement>) {
+    if (!aiming || !videoRef.current) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = Math.min(0.95, Math.max(0.05, (e.clientX - rect.left) / rect.width));
+    setColumn(x);
+    setAiming(false);
+    const close = closeCameraRef.current ?? (() => {});
+    closeCameraRef.current = null;
+    session.start(cameraSampler(videoRef.current, x, close), "camera");
+  }
+
+  function finishCup() {
+    if (cupStartedAt === null) return;
+    const seconds = (performance.now() - cupStartedAt) / 1000;
+    const ml = parseFloat(cupMl);
+    if (!(ml > 0) || seconds < 0.5) return;
+    setResult(streamMeasurement(ml, seconds));
+    setCupStartedAt(null);
+    setStreamFound(false);
   }
 
   function startTapping() {
@@ -115,7 +170,7 @@ export default function App() {
   }
 
   const lowResult = result && result.confidence === "low" ? result : null;
-  const fallbackFrom: Source | null = mode !== "idle" ? null : (failure?.source ?? (lowResult && !useEstimate ? lowResult.source : null));
+  const fallbackFrom: Source | null = mode !== "idle" || streamFound ? null : (failure?.source ?? (lowResult && !useEstimate ? lowResult.source : null));
   const measured = result && result.dropsPerMin !== null && (result.confidence !== "low" || useEstimate) ? result : null;
 
   // cost math
@@ -137,11 +192,11 @@ export default function App() {
         </header>
 
         <Section n="01" title="measure">
-          {mode === "idle" && !fallbackFrom && (
+          {mode === "idle" && !fallbackFrom && !streamFound && (
             <>
               <p className="text-sm text-neutral-600">
-                hold your mic close to where the drops land and keep the room quiet. drippy listens for 30 seconds, longer
-                for slow drips.
+                hold your mic close to where the drops land. drippy first learns the background sound, then listens for
+                30 seconds, longer for slow drips. for a steady stream, use the camera.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <Button primary onClick={listen}>
@@ -166,28 +221,83 @@ export default function App() {
             />
           )}
 
-          <div className={mode === "camera" ? "relative mb-3" : "hidden"}>
+          {streamFound && mode === "idle" && (
+            <div className="border border-neutral-900 p-4">
+              <p className="text-sm">
+                that's a steady stream, not drops, so it can't be counted drop by drop. measure it instead: hold a container
+                under it, press start as the water hits it, and press full when it's full.
+              </p>
+              <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+                <span className="text-neutral-500">container</span>
+                <span className="flex items-baseline">
+                  <NumberInput value={cupMl} onChange={setCupMl} step="1" label="container size in ml" />
+                  <span className="ml-1">ml</span>
+                </span>
+                <span className="text-xs text-neutral-500">473 ml = 2 cups, a typical water bottle</span>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {cupStartedAt === null ? (
+                  <Button primary onClick={() => setCupStartedAt(performance.now())} disabled={!(parseFloat(cupMl) > 0)}>
+                    start
+                  </Button>
+                ) : (
+                  <Button primary onClick={finishCup}>
+                    full
+                  </Button>
+                )}
+                <Button onClick={watch}>watch again</Button>
+                <Button onClick={cancel}>cancel</Button>
+              </div>
+              {cupStartedAt !== null && <CupTimer startedAt={cupStartedAt} />}
+            </div>
+          )}
+
+          <div
+            className={mode === "camera" ? `relative mb-3 ${aiming ? "cursor-crosshair" : ""}` : "hidden"}
+            onClick={aimAt}
+          >
             <video ref={videoRef} playsInline muted className="block h-auto w-full bg-neutral-100" />
-            <div
-              className="absolute inset-y-0 border-x border-dashed border-blue-600"
-              style={{ left: `${CAMERA_ROI.left * 100}%`, width: `${CAMERA_ROI.width * 100}%` }}
-            />
+            {aiming ? (
+              <div className="absolute inset-x-0 top-0 bg-white/90 p-2 text-center text-sm">
+                tap the picture where the drops fall
+              </div>
+            ) : (
+              <div
+                className="absolute inset-y-0 border-x border-blue-600 bg-blue-600/10"
+                style={{
+                  left: `${(column - COLUMN_HALF_WIDTH) * 100}%`,
+                  width: `${COLUMN_HALF_WIDTH * 2 * 100}%`,
+                }}
+              />
+            )}
           </div>
 
-          {(mode === "mic" || mode === "camera") && (
+          {mode === "camera" && aiming && (
+            <>
+              <p className="text-xs text-neutral-500">
+                point the camera at the tap so the drops fall through the picture. keep at least a hand's width of the fall
+                in view, and rest the phone on something if you can.
+              </p>
+              <div className="mt-4">
+                <Button onClick={cancel}>cancel</Button>
+              </div>
+            </>
+          )}
+
+          {(mode === "mic" || (mode === "camera" && !aiming)) && (
             <>
               <canvas ref={session.canvasRef} className="block h-20 w-full border border-neutral-200" />
               <div className="mt-3 flex items-baseline justify-between text-sm">
                 <span>
-                  {session.drops} drop{session.drops === 1 ? "" : "s"}
+                  {live.matched.length} drop{live.matched.length === 1 ? "" : "s"}
+                  <span className="text-neutral-500">
+                    {" "}
+                    · {session.onsets.length} {mode === "mic" ? "drop-like sounds" : "falling objects"}
+                  </span>
                 </span>
                 <span className="tabular-nums text-neutral-500">{clock(session.elapsed)}</span>
               </div>
-              <p className="mt-2 text-xs text-neutral-500">
-                {mode === "mic"
-                  ? "listening. each blue tick is a drop. stops on its own once it has enough."
-                  : "keep the falling drops inside the dashed strip and hold still. each blue tick is a drop."}
-              </p>
+              <p className="mt-2 text-xs text-neutral-500">{STATUS_TEXT[session.status]}</p>
               <div className="mt-4 flex gap-2">
                 <Button primary onClick={stopEarly}>
                   stop
@@ -225,15 +335,37 @@ export default function App() {
         {measured && (
           <>
             <Section n="02" title="rate">
-              <div className="flex items-baseline gap-2">
-                <span className="text-4xl tabular-nums text-blue-600">{formatRate(dpm)}</span>
-                <span className="text-sm">drops / min</span>
-              </div>
-              <p className="mt-2 text-xs text-neutral-500">
-                one drop every {((measured.intervalMs ?? 0) / 1000).toFixed(1)} s · {measured.confidence} confidence ·{" "}
-                {measured.drops} drops in {Math.round(measured.durationMs / 1000)} s from {SOURCE_LABEL[measured.source]}
-              </p>
-              <BottleSimulation dropsPerMin={dpm} intervalMs={measured.intervalMs ?? 60000 / dpm} litersPerDay={lpd} />
+              {measured.stream ? (
+                <>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-4xl tabular-nums text-blue-600">{Math.round(measured.stream.mlPerMin)}</span>
+                    <span className="text-sm">ml / min</span>
+                  </div>
+                  <p className="mt-2 text-xs text-neutral-500">
+                    steady stream · a {measured.stream.containerMl} ml container filled in {measured.stream.seconds.toFixed(1)} s ·
+                    about {formatRate(dpm)} drops&apos; worth a minute
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-4xl tabular-nums text-blue-600">{formatRate(dpm)}</span>
+                    <span className="text-sm">drops / min</span>
+                  </div>
+                  <p className="mt-2 text-xs text-neutral-500">
+                    one drop every {((measured.intervalMs ?? 0) / 1000).toFixed(1)} s · {measured.confidence} confidence ·{" "}
+                    {measured.drops} drops in a steady rhythm over {Math.round(measured.durationMs / 1000)} s from{" "}
+                    {SOURCE_LABEL[measured.source]}
+                    {measured.events > measured.drops ? ` (${measured.events - measured.drops} other ${measured.source === "mic" ? "sounds" : "movements"} ignored)` : ""}
+                  </p>
+                </>
+              )}
+              <BottleSimulation
+                dropsPerMin={dpm}
+                intervalMs={measured.intervalMs ?? 60000 / dpm}
+                litersPerDay={lpd}
+                stream={!!measured.stream}
+              />
             </Section>
 
             <Section n="03" title="cost">
@@ -319,6 +451,15 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+function CupTimer({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => performance.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(performance.now()), 100);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <p className="mt-3 text-sm tabular-nums">{((now - startedAt) / 1000).toFixed(1)} s</p>;
 }
 
 function Section({ n, title, children }: { n: string; title: string; children: ReactNode }) {
@@ -432,9 +573,9 @@ function Fallback({
   const text = blocked
     ? `${message}. ${from === "mic" ? "the camera can watch the drops instead." : "you can tap along with the drops instead."}`
     : from === "mic"
-      ? `couldn't count drops reliably from sound (${message}). the camera can watch the drops instead.`
+      ? `couldn't count drops reliably from sound (${message}). the camera can watch the drops instead, and it can also spot a steady stream.`
       : from === "camera"
-        ? `couldn't see drops clearly (${message}). try more light and a closer view, or tap along with the drops.`
+        ? `couldn't see drops clearly (${message}). make sure you tapped where the drops fall, add light, move closer, or tap along with the drops.`
         : `couldn't get a steady rhythm from your taps (${message}).`;
 
   return (
