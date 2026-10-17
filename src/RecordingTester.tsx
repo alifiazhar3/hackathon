@@ -84,12 +84,12 @@ export function RecordingTester({
     <div>
       {phase === "pick" && (
         <>
-          <p className="text-sm text-neutral-600">
+          <p className="text-sm text-water-ink/80">
             pick a video or audio file of the drip. drippy checks its sound and its picture with the same detectors it
             uses live, so you can see exactly what it counts. 10–30 seconds is plenty.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
-            <label className="cursor-pointer bg-neutral-900 px-4 py-2 text-sm text-white hover:bg-neutral-700">
+            <label className="cursor-pointer rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink">
               choose a file
               <input
                 type="file"
@@ -98,7 +98,7 @@ export function RecordingTester({
                 onChange={(e) => choose(e.target.files?.[0])}
               />
             </label>
-            <button type="button" onClick={onCancel} className="border border-neutral-300 px-4 py-2 text-sm hover:border-neutral-900">
+            <button type="button" onClick={onCancel} className="rounded-full border-[3px] border-water-deep bg-white px-5 py-2 text-sm font-medium text-water-deep hover:bg-sky">
               cancel
             </button>
           </div>
@@ -110,12 +110,12 @@ export function RecordingTester({
           className={phase === "aim" || phase === "checking" ? `relative mb-3 ${phase === "aim" ? "cursor-crosshair" : ""}` : "hidden"}
           onClick={aimAt}
         >
-          <video ref={videoRef} src={url} muted playsInline preload="auto" onLoadedData={onLoaded} className="block h-auto w-full bg-neutral-100" />
+          <video ref={videoRef} src={url} muted playsInline preload="auto" onLoadedData={onLoaded} className="block h-auto w-full bg-sky" />
           {phase === "aim" ? (
             <div className="absolute inset-x-0 top-0 bg-white/90 p-2 text-center text-sm">tap the picture where the drops fall</div>
           ) : (
             <div
-              className="absolute inset-y-0 border-x border-blue-600 bg-blue-600/10"
+              className="absolute inset-y-0 border-x border-water-deep bg-water/20"
               style={{ left: `${(column - COLUMN_HALF_WIDTH) * 100}%`, width: `${COLUMN_HALF_WIDTH * 2 * 100}%` }}
             />
           )}
@@ -124,10 +124,10 @@ export function RecordingTester({
 
       {phase === "aim" && (
         <div className="flex gap-2">
-          <button type="button" onClick={() => void check(null)} className="border border-neutral-300 px-4 py-2 text-sm hover:border-neutral-900">
+          <button type="button" onClick={() => void check(null)} className="rounded-full border-[3px] border-water-deep bg-white px-5 py-2 text-sm font-medium text-water-deep hover:bg-sky">
             sound only
           </button>
-          <button type="button" onClick={onCancel} className="border border-neutral-300 px-4 py-2 text-sm hover:border-neutral-900">
+          <button type="button" onClick={onCancel} className="rounded-full border-[3px] border-water-deep bg-white px-5 py-2 text-sm font-medium text-water-deep hover:bg-sky">
             cancel
           </button>
         </div>
@@ -136,8 +136,8 @@ export function RecordingTester({
       {phase === "checking" && (
         <div>
           <p className="text-sm">{step}</p>
-          <div className="mt-2 h-1 bg-neutral-100">
-            <div className="h-full bg-blue-600" style={{ width: `${Math.round(progress * 100)}%` }} />
+          <div className="mt-2 h-1 bg-sky">
+            <div className="h-full bg-water" style={{ width: `${Math.round(progress * 100)}%` }} />
           </div>
         </div>
       )}
@@ -146,25 +146,25 @@ export function RecordingTester({
         <div className="space-y-4">
           <table className="w-full text-sm">
             <tbody>
-              <tr className="border-b border-neutral-100">
-                <td className="py-2 pr-3 text-neutral-500">sound</td>
+              <tr className="border-b border-water-light/50">
+                <td className="py-2 pr-3 text-water-deep">sound</td>
                 <td className="py-2">{describe(sound)}</td>
               </tr>
-              <tr className="border-b border-neutral-100">
-                <td className="py-2 pr-3 text-neutral-500">picture</td>
+              <tr className="border-b border-water-light/50">
+                <td className="py-2 pr-3 text-water-deep">picture</td>
                 <td className="py-2">
                   {picture?.isStream ? "a steady stream, not drops" : picture ? describe(picture.measurement) : "not checked"}
                 </td>
               </tr>
             </tbody>
           </table>
-          <p className="text-xs text-neutral-500">
+          <p className="text-xs text-water-deep">
             if the sound and picture disagree, the clip's sound may have been added separately; trust the one that matches
             what you see.
           </p>
           <div className="flex flex-wrap gap-2">
             {usable(sound) && (
-              <button type="button" onClick={() => onUse(sound!)} className="bg-neutral-900 px-4 py-2 text-sm text-white hover:bg-neutral-700">
+              <button type="button" onClick={() => onUse(sound!)} className="rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink">
                 use the sound result
               </button>
             )}
@@ -172,24 +172,24 @@ export function RecordingTester({
               <button
                 type="button"
                 onClick={() => onUse(picture.measurement)}
-                className="bg-neutral-900 px-4 py-2 text-sm text-white hover:bg-neutral-700"
+                className="rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink"
               >
                 use the picture result
               </button>
             )}
             {picture?.isStream && (
-              <button type="button" onClick={onStream} className="bg-neutral-900 px-4 py-2 text-sm text-white hover:bg-neutral-700">
+              <button type="button" onClick={onStream} className="rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink">
                 measure the stream
               </button>
             )}
             <button
               type="button"
               onClick={() => setPhase("pick")}
-              className="border border-neutral-300 px-4 py-2 text-sm hover:border-neutral-900"
+              className="rounded-full border-[3px] border-water-deep bg-white px-5 py-2 text-sm font-medium text-water-deep hover:bg-sky"
             >
               try another file
             </button>
-            <button type="button" onClick={onCancel} className="border border-neutral-300 px-4 py-2 text-sm hover:border-neutral-900">
+            <button type="button" onClick={onCancel} className="rounded-full border-[3px] border-water-deep bg-white px-5 py-2 text-sm font-medium text-water-deep hover:bg-sky">
               cancel
             </button>
           </div>

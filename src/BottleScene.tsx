@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Edges, Html, OrbitControls } from "@react-three/drei";
+import { Html, OrbitControls } from "@react-three/drei";
 import { DoubleSide, LatheGeometry, Vector2, type Mesh, type MeshBasicMaterial } from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { groupLabel, TIER_SCALE, type BottleGroup } from "@/lib/bottles";
 import { FALL_MS, RIPPLE_MS, type LiveDrop } from "@/lib/useLiveDrops";
 
-const INK = "#171717";
-const WATER = "#2563eb";
+const INK = "#2f4c7a";
+const WATER = "#5b9fd0";
 
 // bottle outline as (radius, height) from the base up; the bottle is 1 unit tall
 const PROFILE: [number, number][] = [
@@ -77,8 +77,7 @@ function Bottle3D({ fill, position, cap = true }: { fill: number; position: [num
         </mesh>
       )}
       <mesh geometry={bodyGeometry} renderOrder={2}>
-        <meshStandardMaterial color="#ffffff" transparent opacity={0.3} roughness={0.15} side={DoubleSide} depthWrite={false} />
-        <Edges threshold={50} color={INK} />
+        <meshStandardMaterial color="#cfe6f6" transparent opacity={0.45} roughness={0.1} metalness={0.1} side={DoubleSide} depthWrite={false} />
       </mesh>
       {cap && (
         <mesh position={[0, 0.94, 0]}>
@@ -226,17 +225,17 @@ export default function BottleScene({
   const surfaceY = Math.max(0.01, liveFill * WATER_MAX);
 
   return (
-    <div className="relative h-80 border border-neutral-200 sm:h-96">
+    <div className="relative h-80 overflow-hidden rounded-2xl border-[3px] border-water-deep sm:h-96">
       <Canvas camera={{ fov: 40 }} dpr={[1, 2]} aria-label="3d view of the water bottles">
-        <color attach="background" args={["#ffffff"]} />
+        <color attach="background" args={["#f5fbff"]} />
         <ambientLight intensity={1.6} />
         <directionalLight position={[3, 6, 4]} intensity={1.4} />
 
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.001, 0]}>
           <planeGeometry args={[40, 40]} />
-          <meshStandardMaterial color="#fafafa" />
+          <meshStandardMaterial color="#eaf5fc" />
         </mesh>
-        <gridHelper args={[40, 80, "#e5e5e5", "#efefef"]} />
+        <gridHelper args={[40, 80, "#c8e1f2", "#dcecf8"]} />
 
         {bottles.map((b) => (
           <group key={b.key} position={b.position} scale={b.scale}>
@@ -245,7 +244,7 @@ export default function BottleScene({
         ))}
         {labels.map((l) => (
           <Html key={l.key} position={l.position} center zIndexRange={[10, 0]}>
-            <span className="pointer-events-none whitespace-nowrap bg-white/80 px-1 text-[11px] text-neutral-600">{l.text}</span>
+            <span className="pointer-events-none whitespace-nowrap bg-white/80 px-1 text-[11px] text-water-ink/80">{l.text}</span>
           </Html>
         ))}
 
@@ -275,11 +274,11 @@ export default function BottleScene({
       </Canvas>
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 p-2">
-        <span className="text-xs text-neutral-500">drag to turn · scroll or pinch to zoom · right-drag to pan</span>
+        <span className="text-xs text-water-deep">drag to turn · scroll or pinch to zoom · right-drag to pan</span>
         <button
           type="button"
           onClick={() => controls.current?.reset()}
-          className="pointer-events-auto shrink-0 border border-neutral-300 bg-white px-2 py-0.5 text-xs hover:border-neutral-900"
+          className="pointer-events-auto shrink-0 rounded-full border-2 border-water-deep bg-white px-3 py-0.5 text-xs font-medium text-water-deep hover:bg-sky"
         >
           reset view
         </button>

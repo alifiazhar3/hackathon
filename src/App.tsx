@@ -20,6 +20,26 @@ import { findRhythm } from "@/lib/rhythm";
 import { useDropSession } from "@/lib/useDropSession";
 import { BottleSimulation } from "@/BottleSimulation";
 import { RecordingTester } from "@/RecordingTester";
+import {
+  BottlePic,
+  BucketPic,
+  CalendarPic,
+  CameraPic,
+  CoinsPic,
+  DropPic,
+  DropsDivider,
+  FilmPic,
+  FingerPic,
+  HappyDropPic,
+  HourglassPic,
+  MicPic,
+  PiggyPic,
+  SleepyDropPic,
+  SunPic,
+  TapPic,
+  WrenchPic,
+} from "@/Pictures";
+import logo from "@/assets/drippy-logo.png";
 
 type Mode = "idle" | "mic" | "camera" | "tap" | "file";
 type RepairKind = "diy" | "plumber";
@@ -189,27 +209,25 @@ export default function App() {
   const shouldFix = breakEvenDays <= FIX_HORIZON_DAYS;
 
   return (
-    <div className="min-h-screen bg-white text-neutral-900">
-      <main className="mx-auto max-w-xl px-4 py-8 sm:py-12">
-        <header className="flex items-baseline justify-between border-b border-neutral-900 pb-3">
-          <h1 className="text-base font-medium">drippy</h1>
-          <span className="text-xs text-neutral-500">drip cost analyzer</span>
+    <div className="min-h-screen bg-sky font-sans text-water-ink">
+      <main className="mx-auto max-w-xl px-4 py-6 sm:py-10">
+        <header className="flex flex-col items-center gap-1 pb-5">
+          <img src={logo} alt="drippy" className="h-20 w-auto sm:h-24" />
+          <span className="text-sm font-medium text-water-deep">how much is that drip costing you?</span>
         </header>
 
-        <Section n="01" title="measure">
+        <Section n="1" title="measure" picture={<TapPic className="h-12 w-12" />} tone="water">
           {mode === "idle" && !fallbackFrom && !streamFound && (
             <>
-              <p className="text-sm text-neutral-600">
+              <p className="text-sm text-water-ink/80">
                 hold your mic close to where the drops land. drippy first learns the background sound, then listens for
                 30 seconds, longer for slow drips. for a steady stream, use the camera.
               </p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <Button primary onClick={listen}>
-                  {result ? "listen again" : "start listening"}
-                </Button>
-                <Button onClick={watch}>use camera</Button>
-                <Button onClick={startTapping}>tap manually</Button>
-                <Button onClick={() => reset("file")}>test a recording</Button>
+              <div className="mt-4 grid grid-cols-1 gap-3 min-[400px]:grid-cols-2">
+                <Choice primary picture={<MicPic />} label={result ? "listen again" : "start listening"} hint="use the microphone" onClick={listen} />
+                <Choice picture={<CameraPic />} label="use camera" hint="watch the drops fall" onClick={watch} />
+                <Choice picture={<FingerPic />} label="tap manually" hint="tap along with each drop" onClick={startTapping} />
+                <Choice picture={<FilmPic />} label="test a recording" hint="check a video or audio file" onClick={() => reset("file")} />
               </div>
             </>
           )}
@@ -242,18 +260,21 @@ export default function App() {
           )}
 
           {streamFound && mode === "idle" && (
-            <div className="border border-neutral-900 p-4">
-              <p className="text-sm">
-                that's a steady stream, not drops, so it can't be counted drop by drop. measure it instead: hold a container
-                under it, press start as the water hits it, and press full when it's full.
-              </p>
+            <div className="rounded-2xl border-[3px] border-water-deep bg-sky-soft p-4">
+              <div className="flex items-start gap-3">
+                <BottlePic className="h-12 w-12 shrink-0" />
+                <p className="text-sm">
+                  that's a steady stream, not drops, so it can't be counted drop by drop. measure it instead: hold a
+                  container under it, press start as the water hits it, and press full when it's full.
+                </p>
+              </div>
               <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
-                <span className="text-neutral-500">container</span>
+                <span className="text-water-deep">container</span>
                 <span className="flex items-baseline">
                   <NumberInput value={cupMl} onChange={setCupMl} step="1" label="container size in ml" />
                   <span className="ml-1">ml</span>
                 </span>
-                <span className="text-xs text-neutral-500">473 ml = 2 cups, a typical water bottle</span>
+                <span className="text-xs text-water-deep">473 ml = 2 cups, a typical water bottle</span>
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
                 {cupStartedAt === null ? (
@@ -273,17 +294,21 @@ export default function App() {
           )}
 
           <div
-            className={mode === "camera" ? `relative mb-3 ${aiming ? "cursor-crosshair" : ""}` : "hidden"}
+            className={
+              mode === "camera"
+                ? `relative mb-3 overflow-hidden rounded-2xl border-[3px] border-water-deep ${aiming ? "cursor-crosshair" : ""}`
+                : "hidden"
+            }
             onClick={aimAt}
           >
-            <video ref={videoRef} playsInline muted className="block h-auto w-full bg-neutral-100" />
+            <video ref={videoRef} playsInline muted className="block h-auto w-full bg-water-light/40" />
             {aiming ? (
-              <div className="absolute inset-x-0 top-0 bg-white/90 p-2 text-center text-sm">
+              <div className="absolute inset-x-0 top-0 bg-white/90 p-2 text-center text-sm font-medium text-water-deep">
                 tap the picture where the drops fall
               </div>
             ) : (
               <div
-                className="absolute inset-y-0 border-x border-blue-600 bg-blue-600/10"
+                className="absolute inset-y-0 border-x-2 border-water-deep bg-water/20"
                 style={{
                   left: `${(column - COLUMN_HALF_WIDTH) * 100}%`,
                   width: `${COLUMN_HALF_WIDTH * 2 * 100}%`,
@@ -294,7 +319,7 @@ export default function App() {
 
           {mode === "camera" && aiming && (
             <>
-              <p className="text-xs text-neutral-500">
+              <p className="text-xs text-water-deep">
                 point the camera at the tap so the drops fall through the picture. keep at least a hand's width of the fall
                 in view, and rest the phone on something if you can.
               </p>
@@ -306,18 +331,22 @@ export default function App() {
 
           {(mode === "mic" || (mode === "camera" && !aiming)) && (
             <>
-              <canvas ref={session.canvasRef} className="block h-20 w-full border border-neutral-200" />
-              <div className="mt-3 flex items-baseline justify-between text-sm">
-                <span>
-                  {live.matched.length} drop{live.matched.length === 1 ? "" : "s"}
-                  <span className="text-neutral-500">
-                    {" "}
-                    · {session.onsets.length} {mode === "mic" ? "drop-like sounds" : "falling objects"}
+              <canvas ref={session.canvasRef} className="block h-20 w-full rounded-xl border-2 border-water-light bg-sky-soft" />
+              <div className="mt-3 flex items-center justify-between">
+                <span className="flex items-center gap-2">
+                  <DropPic className="bob h-7 w-7" />
+                  <span className="text-2xl font-semibold tabular-nums text-water-deep">{live.matched.length}</span>
+                  <span className="text-sm">
+                    drop{live.matched.length === 1 ? "" : "s"}
+                    <span className="text-water-deep">
+                      {" "}
+                      · {session.onsets.length} {mode === "mic" ? "drop-like sounds" : "falling objects"}
+                    </span>
                   </span>
                 </span>
-                <span className="tabular-nums text-neutral-500">{clock(session.elapsed)}</span>
+                <span className="rounded-full bg-sky px-3 py-1 text-sm tabular-nums text-water-deep">{clock(session.elapsed)}</span>
               </div>
-              <p className="mt-2 text-xs text-neutral-500">{STATUS_TEXT[session.status]}</p>
+              <p className="mt-2 text-xs text-water-deep">{STATUS_TEXT[session.status]}</p>
               <div className="mt-4 flex gap-2">
                 <Button primary onClick={stopEarly}>
                   stop
@@ -329,17 +358,18 @@ export default function App() {
 
           {mode === "tap" && (
             <>
-              <p className="text-sm text-neutral-600">tap the button each time a drop lands. 6 or more taps works best.</p>
+              <p className="text-sm text-water-ink/80">tap the big button each time a drop lands. 6 or more taps works best.</p>
               <button
                 type="button"
                 onPointerDown={() => setTaps((t) => [...t, performance.now()])}
-                className="mt-4 h-32 w-full touch-manipulation select-none border border-neutral-900 text-sm active:bg-neutral-900 active:text-white"
+                className="mt-4 flex h-36 w-full touch-manipulation select-none flex-col items-center justify-center gap-1 rounded-3xl border-[3px] border-water-deep bg-water-light text-lg font-semibold shadow-chunky active:translate-y-1 active:bg-water active:shadow-none"
               >
+                <FingerPic className="h-14 w-14" />
                 tap
               </button>
               <div className="mt-3 flex items-center justify-between">
                 <span className="text-sm">
-                  {taps.length} tap{taps.length === 1 ? "" : "s"}
+                  <span className="text-2xl font-semibold text-water-deep">{taps.length}</span> tap{taps.length === 1 ? "" : "s"}
                 </span>
                 <div className="flex gap-2">
                   <Button primary onClick={finishTapping} disabled={taps.length < 3}>
@@ -354,14 +384,15 @@ export default function App() {
 
         {measured && (
           <>
-            <Section n="02" title="rate">
+            <DropsDivider />
+            <Section n="2" title="rate" picture={<DropPic className="bob h-12 w-12" />} tone="water">
               {measured.stream ? (
                 <>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-4xl tabular-nums text-blue-600">{Math.round(measured.stream.mlPerMin)}</span>
-                    <span className="text-sm">ml / min</span>
+                    <span className="text-5xl font-semibold tabular-nums text-water-deep">{Math.round(measured.stream.mlPerMin)}</span>
+                    <span className="text-lg">ml / min</span>
                   </div>
-                  <p className="mt-2 text-xs text-neutral-500">
+                  <p className="mt-2 text-xs text-water-deep">
                     steady stream · a {measured.stream.containerMl} ml container filled in {measured.stream.seconds.toFixed(1)} s ·
                     about {formatRate(dpm)} drops&apos; worth a minute
                   </p>
@@ -369,14 +400,16 @@ export default function App() {
               ) : (
                 <>
                   <div className="flex items-baseline gap-2">
-                    <span className="text-4xl tabular-nums text-blue-600">{formatRate(dpm)}</span>
-                    <span className="text-sm">drops / min</span>
+                    <span className="text-5xl font-semibold tabular-nums text-water-deep">{formatRate(dpm)}</span>
+                    <span className="text-lg">drops / min</span>
                   </div>
-                  <p className="mt-2 text-xs text-neutral-500">
+                  <p className="mt-2 text-xs text-water-deep">
                     one drop every {((measured.intervalMs ?? 0) / 1000).toFixed(1)} s · {measured.confidence} confidence ·{" "}
                     {measured.drops} drops in a steady rhythm over {Math.round(measured.durationMs / 1000)} s from{" "}
                     {SOURCE_LABEL[measured.source]}
-                    {measured.events > measured.drops ? ` (${measured.events - measured.drops} other ${measured.source === "mic" ? "sounds" : "movements"} ignored)` : ""}
+                    {measured.events > measured.drops
+                      ? ` (${measured.events - measured.drops} other ${measured.source === "mic" ? "sounds" : "movements"} ignored)`
+                      : ""}
                   </p>
                 </>
               )}
@@ -388,39 +421,33 @@ export default function App() {
               />
             </Section>
 
-            <Section n="03" title="cost">
+            <DropsDivider />
+            <Section n="3" title="cost" picture={<CoinsPic className="h-12 w-12" />} tone="coral">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
-                <span className="text-neutral-500">water price</span>
+                <span className="text-water-deep">water price</span>
                 <span className="flex items-baseline">
                   $<NumberInput value={price} onChange={setPrice} step="0.001" label="water price" />
                 </span>
-                <span className="text-neutral-500">per</span>
+                <span className="text-water-deep">per</span>
                 <Toggle options={["gal", "l"] as const} value={unit} onChange={switchUnit} />
               </div>
-              <table className="mt-4 w-full text-sm tabular-nums">
-                <thead>
-                  <tr className="border-b border-neutral-200 text-left text-xs text-neutral-500">
-                    <th className="py-2 font-normal">per</th>
-                    <th className="py-2 text-right font-normal">water</th>
-                    <th className="py-2 text-right font-normal">cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {PERIODS.map(([label, days]) => (
-                    <tr key={label} className="border-b border-neutral-100">
-                      <td className="py-2">{label}</td>
-                      <td className="py-2 text-right">{formatVolume(lpd * days, unit)}</td>
-                      <td className="py-2 text-right">{formatMoney(costPerDay * days)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="mt-2 text-xs text-neutral-500">assumes 0.25 ml per drop.</p>
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {PERIODS.map(([label, days]) => (
+                  <div key={label} className="flex flex-col items-center rounded-2xl border-[3px] border-coral-light bg-coral-light/40 p-3 text-center">
+                    {PERIOD_PICTURE[label]}
+                    <span className="mt-1 text-xs font-medium text-water-deep">a {label}</span>
+                    <span className="text-xl font-semibold tabular-nums text-coral-deep">{formatMoney(costPerDay * days)}</span>
+                    <span className="text-xs tabular-nums text-water-deep">{formatVolume(lpd * days, unit)}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-3 text-xs text-water-deep">assumes 0.25 ml per drop.</p>
             </Section>
 
-            <Section n="04" title="break-even">
+            <DropsDivider />
+            <Section n="4" title="break-even" picture={<HourglassPic className="h-12 w-12" />} tone="sun">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
-                <span className="text-neutral-500">repair</span>
+                <span className="text-water-deep">repair</span>
                 <Toggle options={["diy", "plumber"] as const} value={repairKind} onChange={setRepairKind} />
                 <span className="flex items-baseline">
                   $
@@ -434,20 +461,23 @@ export default function App() {
               </div>
               {costPerDay > 0 ? (
                 <>
-                  <p className="mt-4 text-sm">
-                    the leak costs more than the repair after <span className="text-blue-600">{formatDuration(breakEvenDays)}</span>.
+                  <p className="mt-4 text-base">
+                    the leak costs more than the repair after{" "}
+                    <span className="rounded-full bg-sun-light px-2 font-semibold text-sun-deep">{formatDuration(breakEvenDays)}</span>.
                   </p>
-                  <div className="mt-4">
-                    <div className="relative h-2 bg-neutral-100">
+                  <div className="mt-5 flex items-center gap-2">
+                    <CoinsPic className="h-9 w-9 shrink-0" />
+                    <div className="relative h-5 flex-1 overflow-hidden rounded-full border-[3px] border-water-deep bg-white">
                       <div
-                        className={`absolute inset-y-0 left-0 ${shouldFix ? "bg-blue-600" : "bg-neutral-300"}`}
+                        className={`absolute inset-y-0 left-0 rounded-full ${shouldFix ? "bg-sun" : "bg-water-light"}`}
                         style={{ width: `${Math.min(1, breakEvenDays / FIX_HORIZON_DAYS) * 100}%` }}
                       />
                     </div>
-                    <div className="mt-1 flex justify-between text-xs text-neutral-500">
-                      <span>today</span>
-                      <span>{shouldFix ? "" : "beyond "}1 year</span>
-                    </div>
+                    <WrenchPic className="h-9 w-9 shrink-0" />
+                  </div>
+                  <div className="mt-1 flex justify-between px-11 text-xs text-water-deep">
+                    <span>today</span>
+                    <span>{shouldFix ? "" : "beyond "}1 year</span>
                   </div>
                 </>
               ) : (
@@ -455,16 +485,25 @@ export default function App() {
               )}
             </Section>
 
-            <Section n="05" title="verdict">
-              <p className="text-2xl">{shouldFix ? "fix it" : "leave it"}</p>
-              <p className="mt-2 text-sm text-neutral-600">
-                {shouldFix
-                  ? `a ${formatMoney(repair)} ${repairKind === "diy" ? "diy repair" : "plumber visit"} pays for itself in ${formatDuration(breakEvenDays)}. left alone, this drip costs about ${formatMoney(costPerDay * 365)} a year.`
-                  : `this drip costs about ${formatMoney(costPerDay * 365)} a year, so a ${formatMoney(repair)} ${repairKind === "diy" ? "diy repair" : "plumber visit"} wouldn't pay for itself within a year. measure again in a month, since drips tend to get worse.`}
-              </p>
-              {measured.confidence === "low" && (
-                <p className="mt-2 text-xs text-neutral-500">based on a low-confidence estimate.</p>
-              )}
+            <DropsDivider />
+            <Section n="5" title="verdict" picture={<PiggyPic className="h-12 w-12" />} tone={shouldFix ? "leaf" : "water"}>
+              <div
+                className={`flex items-center gap-4 rounded-2xl border-[3px] p-4 ${shouldFix ? "border-leaf bg-leaf-light" : "border-water-light bg-sky-soft"}`}
+              >
+                <div className="flex shrink-0 items-end">
+                  {shouldFix ? <HappyDropPic className="bob h-16 w-16" /> : <SleepyDropPic className="bob h-16 w-16" />}
+                  {shouldFix ? <WrenchPic className="-ml-2 h-10 w-10" /> : <BucketPic className="-ml-2 h-10 w-10" />}
+                </div>
+                <div>
+                  <p className={`text-3xl font-bold ${shouldFix ? "text-leaf-deep" : "text-water-deep"}`}>{shouldFix ? "fix it!" : "leave it"}</p>
+                  <p className="mt-1 text-sm">
+                    {shouldFix
+                      ? `a ${formatMoney(repair)} ${repairKind === "diy" ? "diy repair" : "plumber visit"} pays for itself in ${formatDuration(breakEvenDays)}. left alone, this drip costs about ${formatMoney(costPerDay * 365)} a year.`
+                      : `this drip costs about ${formatMoney(costPerDay * 365)} a year, so a ${formatMoney(repair)} ${repairKind === "diy" ? "diy repair" : "plumber visit"} wouldn't pay for itself within a year. measure again in a month, since drips tend to get worse.`}
+                  </p>
+                </div>
+              </div>
+              {measured.confidence === "low" && <p className="mt-2 text-xs text-water-deep">based on a low-confidence estimate.</p>}
             </Section>
           </>
         )}
@@ -482,14 +521,79 @@ function CupTimer({ startedAt }: { startedAt: number }) {
   return <p className="mt-3 text-sm tabular-nums">{((now - startedAt) / 1000).toFixed(1)} s</p>;
 }
 
-function Section({ n, title, children }: { n: string; title: string; children: ReactNode }) {
+type Tone = "water" | "coral" | "sun" | "leaf";
+
+const TONE_BADGE: Record<Tone, string> = {
+  water: "bg-water-light",
+  coral: "bg-coral-light",
+  sun: "bg-sun-light",
+  leaf: "bg-leaf-light",
+};
+
+const PERIOD_PICTURE: Record<string, ReactNode> = {
+  day: <SunPic className="h-10 w-10" />,
+  week: <CalendarPic className="h-10 w-10" mark="7" />,
+  month: <CalendarPic className="h-10 w-10" mark="30" />,
+  year: <CalendarPic className="h-10 w-10" mark="365" />,
+};
+
+function Section({
+  n,
+  title,
+  picture,
+  tone,
+  children,
+}: {
+  n: string;
+  title: string;
+  picture: ReactNode;
+  tone: Tone;
+  children: ReactNode;
+}) {
   return (
-    <section className="border-b border-neutral-200 py-6">
-      <h2 className="mb-4 text-xs text-neutral-500">
-        {n} · {title}
+    <section className="mb-2 rounded-3xl border-[3px] border-water-deep bg-white p-5 shadow-chunky">
+      <h2 className="mb-4 flex items-center gap-3">
+        {picture}
+        <span
+          className={`flex h-8 w-8 items-center justify-center rounded-full border-[3px] border-water-deep text-sm font-bold ${TONE_BADGE[tone]}`}
+        >
+          {n}
+        </span>
+        <span className="text-xl font-semibold text-water-deep">{title}</span>
       </h2>
       {children}
     </section>
+  );
+}
+
+/** a big picture button for choosing how to measure */
+function Choice({
+  picture,
+  label,
+  hint,
+  onClick,
+  primary,
+}: {
+  picture: ReactNode;
+  label: string;
+  hint: string;
+  onClick: () => void;
+  primary?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex items-center gap-3 rounded-2xl border-[3px] border-water-deep p-3 text-left shadow-chunky transition-transform hover:-translate-y-0.5 active:translate-y-1 active:shadow-none ${
+        primary ? "bg-water-light" : "bg-white hover:bg-sky-soft"
+      }`}
+    >
+      <span className="shrink-0">{picture}</span>
+      <span>
+        <span className="block font-semibold">{label}</span>
+        <span className="block text-xs text-water-deep">{hint}</span>
+      </span>
+    </button>
   );
 }
 
@@ -509,10 +613,8 @@ function Button({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`px-4 py-2 text-sm transition-colors disabled:opacity-30 ${
-        primary
-          ? "bg-neutral-900 text-white hover:bg-neutral-700"
-          : "border border-neutral-300 hover:border-neutral-900"
+      className={`rounded-full border-[3px] border-water-deep px-5 py-2 text-sm font-medium transition-colors disabled:opacity-30 ${
+        primary ? "bg-water-deep text-white hover:bg-water-ink" : "bg-white text-water-deep hover:bg-sky"
       }`}
     >
       {children}
@@ -530,13 +632,13 @@ function Toggle<T extends string>({
   onChange: (v: T) => void;
 }) {
   return (
-    <span className="inline-flex border border-neutral-300">
+    <span className="inline-flex overflow-hidden rounded-full border-[3px] border-water-deep">
       {options.map((o) => (
         <button
           key={o}
           type="button"
           onClick={() => onChange(o)}
-          className={`px-2 py-0.5 text-sm ${o === value ? "bg-neutral-900 text-white" : "hover:bg-neutral-100"}`}
+          className={`px-3 py-0.5 text-sm font-medium ${o === value ? "bg-water-deep text-white" : "bg-white text-water-deep hover:bg-sky"}`}
         >
           {o}
         </button>
@@ -565,7 +667,7 @@ function NumberInput({
       value={value}
       aria-label={label}
       onChange={(e) => onChange(e.target.value)}
-      className="w-20 border-b border-neutral-300 bg-transparent py-0.5 pl-1 text-sm tabular-nums focus:border-neutral-900 focus:outline-none"
+      className="ml-1 w-20 rounded-xl border-2 border-water-light bg-sky-soft px-2 py-0.5 text-sm tabular-nums focus:border-water-deep focus:outline-none"
     />
   );
 }
@@ -599,8 +701,11 @@ function Fallback({
         : `couldn't get a steady rhythm from your taps (${message}).`;
 
   return (
-    <div className="border border-neutral-900 p-4">
-      <p className="text-sm">{text}</p>
+    <div className="rounded-2xl border-[3px] border-sun bg-sun-light p-4">
+      <div className="flex items-start gap-3">
+        <SleepyDropPic className="h-12 w-12 shrink-0" />
+        <p className="text-sm">{text}</p>
+      </div>
       <div className="mt-4 flex flex-wrap gap-2">
         {from === "mic" && (
           <>
@@ -630,7 +735,7 @@ function Fallback({
         )}
       </div>
       {estimate !== null && (
-        <button type="button" onClick={onUseEstimate} className="mt-3 text-xs text-neutral-500 underline hover:text-neutral-900">
+        <button type="button" onClick={onUseEstimate} className="mt-3 text-xs text-water-deep underline hover:text-water-ink">
           use the rough estimate anyway ({formatRate(estimate)} drops / min)
         </button>
       )}
