@@ -90,7 +90,8 @@ export function formatDuration(days: number) {
   if (days < 14) return plural(Math.round(days), "day");
   if (days < 61) return plural(Math.round(days / 7), "week");
   if (days < 730) return plural(Math.round(days / 30.44), "month");
-  return `${(days / 365).toFixed(1)} years`;
+  if (days < 3650) return `${(days / 365).toFixed(1)} years`;
+  return `${Math.round(days / 365).toLocaleString("en-US")} years`;
 }
 
 export function formatMoney(x: number) {

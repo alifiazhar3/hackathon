@@ -15,6 +15,7 @@ import {
 } from "@/lib/drips";
 import { CAMERA_DETECTOR, CAMERA_ROI, cameraSampler, MIC_DETECTOR, micSampler } from "@/lib/samplers";
 import { useDropSession } from "@/lib/useDropSession";
+import { PoolSimulation } from "@/PoolSimulation";
 
 type Mode = "idle" | "mic" | "camera" | "tap";
 type RepairKind = "diy" | "plumber";
@@ -232,6 +233,12 @@ export default function App() {
                 one drop every {((measured.intervalMs ?? 0) / 1000).toFixed(1)} s · {measured.confidence} confidence ·{" "}
                 {measured.drops} drops in {Math.round(measured.durationMs / 1000)} s from {SOURCE_LABEL[measured.source]}
               </p>
+              <PoolSimulation
+                dropsPerMin={dpm}
+                intervalMs={measured.intervalMs ?? 60000 / dpm}
+                litersPerDay={lpd}
+                unit={unit}
+              />
             </Section>
 
             <Section n="03" title="cost">
