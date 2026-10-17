@@ -5,6 +5,10 @@
  * mostly between 1 and 6 khz, and dies away within a fraction of a second.
  * speech, music and fans rise more slowly or last longer, so they're rejected.
  * the background level is learned first, then tracked slowly.
+ *
+ * the settings are tuned on a real recording of a dripping tap, where each
+ * drop rises in 2–6 ms and fades within about 20 ms, with a pitch that glides
+ * upward (so a steady-pitch test would wrongly reject it).
  */
 
 class Biquad {
@@ -44,54 +48,72 @@ class Biquad {
 const FRAME_SEC = 0.002;
 /** time spent learning the background before counting */
 export const CALIBRATE_SEC = 2;
-/** a drop must be this much louder than the background (energy ratio, ~12 db) */
-const SNR = 16;
-/** ...and this much louder than the moment just before it (~8 db) */
-const ATTACK = 6;
-/** the loudest point must come this soon after the start */
-const MAX_RISE_SEC = 0.014;
-/** a drop rings for at least this long (clicks and speech bursts are shorter)... */
-const MIN_RING_SEC = 0.02;
-/** ...and has died away by this point */
-const MAX_DECAY_SEC = 0.2;
-/** a drop rings like a tone: zero crossings stay evenly spaced (noise bursts don't) */
-const MAX_CROSSING_SPREAD = 0.3;
-const TONE_WINDOW_SEC = 0.02;
-/** decayed = back below this fraction of the peak, or near the background */
-const DECAY_TO = 0.05;
-const REFRACTORY_SEC = 0.08;
+export type AudioDetectorOptions = {
+  /** a drop must be this much louder than the background (energy ratio) */
+  snr: number;
+  /** ...and this much louder than the moment just before it */
+  attack: number;
+  /** the loudest point must come this soon after the start */
+  maxRiseSec: number;
+  /** a drop rings for at least this long (single clicks are shorter)... */
+  minRingSec: number;
+  /** ...and has died away by this point */
+  maxDecaySec: number;
+  /** decayed = back below this fraction of the peak, or near the background */
+  decayTo: number;
+  /** a second sound this soon after a drop is a splash or echo of it */
+  refractorySec: number;
+  /** share of a drop's energy that must fall in the 1–6 khz band (speech and knocks spread wider) */
+  minBandShare: number;
+};
+
+export const AUDIO_DEFAULTS: AudioDetectorOptions = {
+  snr: 16,
+  attack: 6,
+  maxRiseSec: 0.014,
+  minRingSec: 0.006,
+  maxDecaySec: 0.2,
+  decayTo: 0.05,
+  refractorySec: 0.15,
+  minBandShare: 0.35,
+};
+
 /** background tracking: falls quickly, rises slowly so bursts don't hide drops */
 const NOISE_FALL_SEC = 0.3;
 const NOISE_RISE_SEC = 3;
 const HISTORY = 8;
 
-type Candidate = { start: number; peak: number; peakFrame: number };
+type Candidate = { start: number; peak: number; peakFrame: number; prev: number; band: number; full: number };
 
 export class AudioDropDetector {
   private filters: Biquad[];
   private frameLen: number;
   private acc = 0;
+  /** unfiltered energy of the current frame, to see how much of a sound is in the drop band */
+  private accFull = 0;
+  private fullEnergy = 0;
+  private calibrationFull: number[] = [];
   private count = 0;
   private frame = 0;
+  /** energies seen while learning the background, checked for drops afterwards */
   private calibration: number[] = [];
   private noise = 0;
   private history: number[] = [];
   private candidate: Candidate | null = null;
   private sustained = false;
-  private quietUntil = 0;
-  private sample = 0;
-  private lastY = 0;
-  /** recent zero crossings (sample positions) of the filtered signal */
-  private crossings: number[] = [];
-  private sampleRate: number;
+  /** loudness of the most recent accepted drop, to keep the louder of two close sounds */
+  private lastPeak = 0;
+  private o: AudioDetectorOptions;
 
   /** drop times in seconds since the first sample */
   readonly onsets: number[] = [];
   /** latest level above the background, in db (for display) */
   level = 0;
+  /** sounds that started like a drop but were rejected, and why (for tuning) */
+  readonly rejected: { t: number; why: string }[] = [];
 
-  constructor(sampleRate: number) {
-    this.sampleRate = sampleRate;
+  constructor(sampleRate: number, options: Partial<AudioDetectorOptions> = {}) {
+    this.o = { ...AUDIO_DEFAULTS, ...options };
     this.frameLen = Math.max(1, Math.round(sampleRate * FRAME_SEC));
     this.filters = [
       Biquad.make("highpass", sampleRate, 1000),
@@ -106,22 +128,21 @@ export class AudioDropDetector {
   }
 
   /** db above the background a sound needs to count */
-  static readonly thresholdDb = 10 * Math.log10(SNR);
+  get thresholdDb() {
+    return 10 * Math.log10(this.o.snr);
+  }
 
   process(samples: Float32Array) {
     for (let i = 0; i < samples.length; i++) {
       let y = samples[i];
+      this.accFull += y * y;
       for (const f of this.filters) y = f.process(y);
-      if ((y >= 0) !== (this.lastY >= 0)) {
-        this.crossings.push(this.sample);
-        if (this.crossings.length > 2000) this.crossings.splice(0, 1000);
-      }
-      this.lastY = y;
-      this.sample++;
       this.acc += y * y;
       if (++this.count === this.frameLen) {
+        this.fullEnergy = this.accFull / this.frameLen;
         this.onFrame(this.acc / this.frameLen);
         this.acc = 0;
+        this.accFull = 0;
         this.count = 0;
       }
     }
@@ -133,34 +154,75 @@ export class AudioDropDetector {
 
     if (t < CALIBRATE_SEC) {
       this.calibration.push(energy);
+      this.calibrationFull.push(this.fullEnergy);
       if ((k + 1) * FRAME_SEC >= CALIBRATE_SEC) {
         const sorted = [...this.calibration].sort((a, b) => a - b);
         this.noise = Math.max(1e-12, sorted[Math.floor(sorted.length / 2)]);
+        // now that the background is known, look for drops in what was heard so far
+        this.calibration.forEach((e, i) => {
+          this.fullEnergy = this.calibrationFull[i];
+          this.detect(e, i);
+        });
+        this.calibration = [];
+        this.calibrationFull = [];
       }
-      this.pushHistory(energy);
       return;
     }
+    this.detect(energy, k);
+  }
 
+  private detect(energy: number, k: number) {
     const ratio = energy / this.noise;
     this.level = ratio > 1 ? 10 * Math.log10(ratio) : 0;
 
     if (this.candidate) {
       const c = this.candidate;
+      // a faint sound that runs into a sharp new jump: time the drop from the jump
+      if (energy > c.peak && energy >= c.prev * this.o.attack) c.start = k;
+      c.prev = energy;
+      c.band += energy;
+      c.full += this.fullEnergy;
       if (energy > c.peak) {
         c.peak = energy;
         c.peakFrame = k;
       }
-      const decayed = energy < c.peak * DECAY_TO || energy < this.noise * 2;
+      const decayed = energy < c.peak * this.o.decayTo || energy < this.noise * 2;
       const age = (k - c.start) * FRAME_SEC;
       if (decayed) {
         const rise = (c.peakFrame - c.start) * FRAME_SEC;
-        if (c.peak >= this.noise * SNR && rise <= MAX_RISE_SEC && age >= MIN_RING_SEC && this.isTonal(c.start)) {
-          this.onsets.push(c.start * FRAME_SEC);
-          this.quietUntil = c.start * FRAME_SEC + REFRACTORY_SEC;
+        const why =
+          c.peak < this.noise * this.o.snr
+            ? "too quiet"
+            : rise > this.o.maxRiseSec
+              ? "rose too slowly"
+              : age < this.o.minRingSec
+                ? "too short"
+                : c.band < c.full * this.o.minBandShare
+                  ? "spread across too many pitches"
+                  : null;
+        if (why === null) {
+          const at = c.start * FRAME_SEC;
+          const last = this.onsets[this.onsets.length - 1];
+          if (last !== undefined && at - last < this.o.refractorySec) {
+            // two sounds this close are one drop plus a splash or echo: keep the louder
+            if (c.peak > this.lastPeak) {
+              this.rejected.push({ t: last, why: "quieter than the sound right after it" });
+              this.onsets[this.onsets.length - 1] = at;
+              this.lastPeak = c.peak;
+            } else {
+              this.rejected.push({ t: at, why: "echo of the drop just before" });
+            }
+          } else {
+            this.onsets.push(at);
+            this.lastPeak = c.peak;
+          }
+        } else {
+          this.rejected.push({ t: c.start * FRAME_SEC, why });
         }
         this.candidate = null;
-      } else if (age > MAX_DECAY_SEC) {
+      } else if (age > this.o.maxDecaySec) {
         // too long to be a drop: wait for this sound to end
+        this.rejected.push({ t: c.start * FRAME_SEC, why: "too long" });
         this.candidate = null;
         this.sustained = true;
       }
@@ -168,8 +230,8 @@ export class AudioDropDetector {
       if (this.sustained && energy < this.noise * 3) this.sustained = false;
       const before = this.history.slice(0, 4);
       const beforeLevel = before.length ? before.reduce((a, b) => a + b, 0) / before.length : energy;
-      if (!this.sustained && t >= this.quietUntil && ratio >= SNR && energy >= beforeLevel * ATTACK) {
-        this.candidate = { start: k, peak: energy, peakFrame: k };
+      if (!this.sustained && ratio >= this.o.snr && energy >= beforeLevel * this.o.attack) {
+        this.candidate = { start: k, peak: energy, peakFrame: k, prev: energy, band: energy, full: this.fullEnergy };
       }
     }
 
@@ -179,18 +241,6 @@ export class AudioDropDetector {
       this.noise = Math.max(1e-12, this.noise * Math.exp(alpha * Math.log(Math.max(energy, 1e-12) / this.noise)));
     }
     this.pushHistory(energy);
-  }
-
-  /** whether the sound starting at this frame rings at a steady pitch */
-  private isTonal(startFrame: number) {
-    const from = startFrame * this.frameLen;
-    const to = from + TONE_WINDOW_SEC * this.sampleRate;
-    const xs = this.crossings.filter((c) => c >= from && c < to);
-    if (xs.length < 6) return false;
-    const gaps = xs.slice(1).map((c, i) => c - xs[i]);
-    const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-    const sd = Math.sqrt(gaps.reduce((a, b) => a + (b - mean) ** 2, 0) / gaps.length);
-    return sd / mean <= MAX_CROSSING_SPREAD;
   }
 
   private pushHistory(energy: number) {

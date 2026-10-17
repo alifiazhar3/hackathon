@@ -33,13 +33,15 @@ export const PERIODS: [label: string, days: number][] = [
 ];
 
 const EVENT_WORD: Record<Source, string> = { mic: "sounds", camera: "falling objects", tap: "taps" };
+/** timing resolution of each source: one video frame, or human tapping */
+export const TIMING_FLOOR_MS: Record<Source, number> = { mic: 20, camera: 40, tap: 60 };
 
 /**
  * whether a rhythm this strong could come from randomly timed events: the same
  * number of events are scattered at random many times, and the real rhythm
  * has to beat every one of those
  */
-function beatsChance(score: number, events: number, durationMs: number) {
+function beatsChance(score: number, events: number, durationMs: number, floorMs: number) {
   let seed = 12345;
   const random = () => {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
@@ -47,7 +49,7 @@ function beatsChance(score: number, events: number, durationMs: number) {
   };
   for (let k = 0; k < 20; k++) {
     const shuffled = Array.from({ length: events }, () => random() * durationMs);
-    if (findRhythm(shuffled).score >= score) return false;
+    if (findRhythm(shuffled, floorMs).score >= score) return false;
   }
   return true;
 }
@@ -55,7 +57,8 @@ function beatsChance(score: number, events: number, durationMs: number) {
 /** turns detected event times (ms) into a drip rate and a confidence level */
 export function analyze(source: Source, onsets: number[], durationMs: number): Measurement {
   const events = onsets.length;
-  const rhythm = findRhythm(onsets);
+  const floorMs = TIMING_FLOOR_MS[source];
+  const rhythm = findRhythm(onsets, floorMs);
   const drops = rhythm.matched.length;
   const base = { source, drops, events, durationMs };
 
@@ -80,11 +83,11 @@ export function analyze(source: Source, onsets: number[], durationMs: number): M
   const coverage = drops / rhythm.expected;
   // how often a random event would land on a predicted drop by luck alone
   const eventsPerMs = events / Math.max(durationMs, 1);
-  const chance = 1 - Math.exp(-eventsPerMs * 2 * tolerance(rhythm.intervalMs, 1));
+  const chance = 1 - Math.exp(-eventsPerMs * 2 * tolerance(rhythm.intervalMs, 1, floorMs));
   const minDrops = source === "tap" ? 4 : 5;
 
   const span = Math.max(durationMs, onsets.length ? Math.max(...onsets) - Math.min(...onsets) : 0);
-  const random = drops < events && !beatsChance(rhythm.score, events, span);
+  const random = drops < events && !beatsChance(rhythm.score, events, span, floorMs);
 
   let confidence: Confidence = "low";
   if (random) confidence = "low";
