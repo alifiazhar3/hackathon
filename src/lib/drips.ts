@@ -1,4 +1,4 @@
-import { findRhythm, tolerance } from "@/lib/rhythm";
+import { findRhythm, tolerance, type SkipWeighting } from "@/lib/rhythm";
 
 export type Source = "mic" | "camera" | "tap" | "both";
 export type Confidence = "high" | "medium" | "low";
@@ -39,26 +39,31 @@ export const TIMING_FLOOR_MS: Record<Source, number> = { mic: 20, camera: 40, ta
 /**
  * whether a rhythm this strong could come from randomly timed events: the same
  * number of events are scattered at random many times, and the real rhythm
- * has to beat every one of those
+ * has to beat at least 18 of 20 of those (a real drip with only a few drops
+ * can tie the odd lucky shuffle)
  */
-function beatsChance(score: number, events: number, durationMs: number, floorMs: number) {
+function beatsChance(score: number, events: number, durationMs: number, floorMs: number, skips: SkipWeighting, allowed: number) {
   let seed = 12345;
   const random = () => {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
     return seed / 0x7fffffff;
   };
+  let asStrong = 0;
   for (let k = 0; k < 20; k++) {
     const shuffled = Array.from({ length: events }, () => random() * durationMs);
-    if (findRhythm(shuffled, floorMs).score >= score) return false;
+    if (findRhythm(shuffled, floorMs, skips).score >= score) asStrong++;
   }
-  return true;
+  return asStrong <= allowed;
 }
 
 /** turns detected event times (ms) into a drip rate and a confidence level */
 export function analyze(source: Source, onsets: number[], durationMs: number): Measurement {
   const events = onsets.length;
   const floorMs = TIMING_FLOOR_MS[source];
-  const rhythm = findRhythm(onsets, floorMs);
+  // drops confirmed by both sensors are clean: skipped beats count more, and
+  // the randomness check can be gentler, since noise rarely pairs up
+  const skips: SkipWeighting = source === "both" ? "clean" : "strict";
+  const rhythm = findRhythm(onsets, floorMs, skips);
   const drops = rhythm.matched.length;
   const base = { source, drops, events, durationMs };
 
@@ -84,15 +89,15 @@ export function analyze(source: Source, onsets: number[], durationMs: number): M
   // how often a random event would land on a predicted drop by luck alone
   const eventsPerMs = events / Math.max(durationMs, 1);
   const chance = 1 - Math.exp(-eventsPerMs * 2 * tolerance(rhythm.intervalMs, 1, floorMs));
-  const minDrops = source === "tap" ? 4 : 5;
+  const minDrops = 4;
 
   const span = Math.max(durationMs, onsets.length ? Math.max(...onsets) - Math.min(...onsets) : 0);
-  const random = drops < events && !beatsChance(rhythm.score, events, span, floorMs);
+  const random = !beatsChance(rhythm.score, events, span, floorMs, skips, source === "both" ? 6 : 2);
 
   let confidence: Confidence = "low";
   if (random) confidence = "low";
-  else if (drops >= 6 && coverage >= Math.max(0.7, chance + 0.45) && rhythm.jitter <= 0.08) confidence = "high";
-  else if (drops >= minDrops && coverage >= Math.max(0.55, chance + 0.35) && rhythm.jitter <= 0.15) confidence = "medium";
+  else if (drops >= 5 && coverage >= Math.max(0.6, chance + 0.35) && rhythm.jitter <= 0.2 && rhythm.fitShare >= 0.6) confidence = "high";
+  else if (drops >= minDrops && coverage >= Math.max(0.4, chance + 0.25) && rhythm.jitter <= 0.35 && rhythm.fitShare >= 0.45) confidence = "medium";
 
   return {
     ...base,

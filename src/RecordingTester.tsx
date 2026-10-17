@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
-import { formatRate, type Measurement } from "@/lib/drips";
+import type { Measurement } from "@/lib/drips";
 import { lengthProblem, ensureDuration, MAX_SECONDS, MIN_SECONDS } from "@/lib/recorder";
 import { analyzePicture, analyzeSound, combine, type RecordingResult } from "@/lib/recording";
 import { COLUMN_HALF_WIDTH } from "@/lib/samplers";
@@ -11,12 +11,6 @@ export type Recorded = { blob: Blob; column: number; seconds: number };
 
 const PRIMARY = "rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink";
 const SECONDARY = "rounded-full border-[3px] border-water-deep bg-white px-5 py-2 text-sm font-medium text-water-deep hover:bg-sky";
-
-function describe(m: Measurement | null) {
-  if (!m) return "nothing to check";
-  if (m.dropsPerMin === null || m.confidence === "low") return `no steady drip found (${m.reason ?? "unclear"})`;
-  return `${m.drops} drops · ${formatRate(m.dropsPerMin)} / min · ${m.confidence} confidence`;
-}
 
 const usable = (m: Measurement | null | undefined): m is Measurement => !!m && m.dropsPerMin !== null && m.confidence !== "low";
 
@@ -80,11 +74,9 @@ export function RecordingTester({
     const combined = combine(sound, picture, length * 1000);
     setResult({ sound, picture, combined });
 
-    // a fresh recording goes straight to the result when it's clear
-    if (recorded) {
-      if (combined?.stream.stream) return onStream(combined.stream.note);
-      if (usable(combined?.measurement)) return onUse(combined.measurement);
-    }
+    // camera and mic together give one answer, which goes straight to the results
+    if (combined?.stream.stream) return onStream(combined.stream.note);
+    if (usable(combined?.measurement)) return onUse(combined.measurement);
     setPhase("done");
   }
 
@@ -114,7 +106,7 @@ export function RecordingTester({
     void check(x, seconds);
   }
 
-  const { sound, picture, combined } = result;
+  const { picture, combined } = result;
 
   return (
     <div>
@@ -127,7 +119,7 @@ export function RecordingTester({
           <div className="mt-4 flex flex-wrap gap-2">
             <label className={`cursor-pointer ${PRIMARY}`}>
               choose a video
-              <input type="file" accept="video/*,audio/*" className="hidden" onChange={(e) => choose(e.target.files?.[0])} />
+              <input type="file" accept="video/*" className="hidden" onChange={(e) => choose(e.target.files?.[0])} />
             </label>
             <button type="button" onClick={onCancel} className={SECONDARY}>
               cancel
@@ -150,7 +142,7 @@ export function RecordingTester({
             </button>
             <label className={`cursor-pointer ${SECONDARY}`}>
               upload another video
-              <input type="file" accept="video/*,audio/*" className="hidden" onChange={(e) => choose(e.target.files?.[0])} />
+              <input type="file" accept="video/*" className="hidden" onChange={(e) => choose(e.target.files?.[0])} />
             </label>
             <button type="button" onClick={onCancel} className={SECONDARY}>
               cancel
@@ -200,61 +192,25 @@ export function RecordingTester({
       )}
 
       {phase === "done" && (
-        <div className="space-y-4">
-          <table className="w-full text-sm">
-            <tbody>
-              {combined && (
-                <tr className="border-b border-water-light/50">
-                  <td className="py-2 pr-3 font-semibold text-water-deep">camera + mic</td>
-                  <td className="py-2 font-semibold">
-                    {combined.stream.stream
-                      ? `a steady stream (${combined.stream.note})`
-                      : combined.measurement
-                        ? `${describe(combined.measurement)} · ${combined.measurement.fused.confirmed} seen and heard`
-                        : "nothing to check"}
-                  </td>
-                </tr>
-              )}
-              <tr className="border-b border-water-light/50">
-                <td className="py-2 pr-3 text-water-deep">sound</td>
-                <td className="py-2">{describe(sound?.measurement ?? null)}</td>
-              </tr>
-              <tr className="border-b border-water-light/50">
-                <td className="py-2 pr-3 text-water-deep">picture</td>
-                <td className="py-2">
-                  {picture?.isStream ? "a steady stream, not drops" : picture ? describe(picture.measurement) : "not checked"}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <p className="text-xs text-water-deep">
-            camera + mic is the most accurate when the sound and picture were recorded together. if they disagree, check the
-            camera is on the tap you can hear, or the clip's sound may have been added separately.
+        <div className="rounded-2xl border-[3px] border-coral bg-coral-light p-4">
+          <p className="text-sm font-semibold text-coral-deep">couldn't measure the drip from this {recorded ? "recording" : "video"}.</p>
+          <p className="mt-1 text-sm">
+            {!picture
+              ? "it needs a video with sound, so the camera and the mic can check each other."
+              : (combined?.measurement?.reason ?? "the camera and the mic didn't find the same steady drip") + "."}
           </p>
-          <div className="flex flex-wrap gap-2">
-            {usable(combined?.measurement) && (
-              <button type="button" onClick={() => onUse(combined!.measurement!)} className={PRIMARY}>
-                use camera + mic
-              </button>
-            )}
-            {usable(sound?.measurement) && (
-              <button type="button" onClick={() => onUse(sound!.measurement)} className={SECONDARY}>
-                use the sound result
-              </button>
-            )}
-            {picture && !picture.isStream && usable(picture.measurement) && (
-              <button type="button" onClick={() => onUse(picture.measurement)} className={SECONDARY}>
-                use the picture result
-              </button>
-            )}
-            {(picture?.isStream || combined?.stream.stream) && (
-              <button type="button" onClick={() => onStream(combined?.stream.note)} className={PRIMARY}>
-                measure the stream
-              </button>
-            )}
-            <button type="button" onClick={onRecord} className={SECONDARY}>
+          <p className="mt-2 text-xs text-water-deep">
+            tips: prop the phone up so it doesn't move, keep the falling drops in view and tap right where they fall, get close
+            enough to hear them land, and keep the room quiet.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button type="button" onClick={onRecord} className={PRIMARY}>
               record again
             </button>
+            <label className={`cursor-pointer ${SECONDARY}`}>
+              upload another video
+              <input type="file" accept="video/*" className="hidden" onChange={(e) => choose(e.target.files?.[0])} />
+            </label>
             <button type="button" onClick={onCancel} className={SECONDARY}>
               cancel
             </button>

@@ -161,6 +161,14 @@ export type VideoScene = {
   insects: number;
   /** a steady stream of water down the column instead of drops */
   stream?: boolean;
+  /** how many pixels of the stream are in view (default: from the tap to the bottom) */
+  streamLength?: number;
+  /** how far the stream sways side to side, in pixels */
+  streamSway?: number;
+  /** how much the stream shimmers (0 = glassy smooth, 0.45 = rippling) */
+  streamShimmer?: number;
+  /** stream thickness (gaussian width in pixels) */
+  streamWidth?: number;
   /** a still vertical pipe or shadow in the column */
   pipe?: boolean;
 };
@@ -233,10 +241,14 @@ export function renderVideo(scene: VideoScene, seed: number, onFrame: (gray: Uin
     }
     // a stream: a thin bright line whose ripples slide downward
     if (scene.stream) {
-      for (let y = topY; y < VH; y++) {
-        for (let x = Math.floor(cx - 2); x <= Math.ceil(cx + 2); x++) {
-          const ripple = 0.55 + 0.45 * Math.sin(y / 2.5 - t * 60 + Math.sin(y / 7) * 2);
-          img[y * VW + x] += scene.dropContrast * ripple * Math.exp(-(((x - cx) / 1.6) ** 2));
+      const shimmer = scene.streamShimmer ?? 0.45;
+      const width = scene.streamWidth ?? 1.6;
+      const end = Math.min(VH, topY + (scene.streamLength ?? VH));
+      for (let y = topY; y < end; y++) {
+        const sx = cx + (scene.streamSway ?? 0) * Math.sin(2 * Math.PI * 0.7 * t + y / 40);
+        for (let x = Math.floor(sx - 3); x <= Math.ceil(sx + 3); x++) {
+          const ripple = 1 - shimmer + shimmer * Math.sin(y / 2.5 - t * 60 + Math.sin(y / 7) * 2);
+          img[y * VW + x] += scene.dropContrast * ripple * Math.exp(-(((x - sx) / width) ** 2));
         }
       }
     }

@@ -10,7 +10,7 @@
  * elsewhere) is reported instead of guessed through.
  */
 import { analyze, type Measurement } from "@/lib/drips";
-import { findRhythm } from "@/lib/rhythm";
+import { findRhythm, tolerance } from "@/lib/rhythm";
 
 /** the sound may come this long after (or, with device delay, slightly before) the sight */
 const LAG_MIN_MS = -300;
@@ -23,7 +23,7 @@ const MIN_PAIRS = 3;
 /** ...covering at least this share of the sensor with fewer events */
 const MIN_PAIR_SHARE = 0.3;
 /** the two sensors' rates must agree this closely */
-const RATE_AGREEMENT = 0.03;
+const RATE_AGREEMENT = 0.1;
 const FLOOR_MS = 45;
 
 export type Fused = Measurement & {
@@ -84,6 +84,20 @@ function rateOf(m: Measurement) {
   return m.dropsPerMin !== null && m.confidence !== "low" ? m.dropsPerMin : null;
 }
 
+const close = (a: number, b: number, within = RATE_AGREEMENT) => Math.abs(a - b) / ((a + b) / 2) <= within;
+
+/** each sensor's rate, weighted by how many drops it caught and how sure it is */
+function average(ms: Measurement[]) {
+  let sum = 0;
+  let weights = 0;
+  for (const m of ms) {
+    const w = Math.max(1, m.drops) * (m.confidence === "high" ? 1 : 0.6);
+    sum += m.dropsPerMin! * w;
+    weights += w;
+  }
+  return sum / weights;
+}
+
 /** seen and heard event times (ms, same clock) over a measurement lasting durationMs */
 export function fuse(seen: number[], heard: number[], durationMs: number): Fused {
   const sound = analyze("mic", heard, durationMs);
@@ -104,9 +118,29 @@ export function fuse(seen: number[], heard: number[], durationMs: number): Fused
   const lagMs = learnLag(seen, heard);
   const base = { lagMs, sound, picture, rates };
 
+  if (lagMs === null && rates === "agree") {
+    // the drops never lined up one for one, but both sensors found the same drip rate
+    const rate = average([sound, picture]);
+    return {
+      ...(sound.drops >= picture.drops ? sound : picture),
+      source: "both",
+      dropsPerMin: rate,
+      intervalMs: 60000 / rate,
+      drops: Math.max(sound.drops, picture.drops),
+      confidence: "medium",
+      reason: null,
+      fused: { ...base, confirmed: 0, heardOnly: 0, seenOnly: 0 },
+    };
+  }
+
   if (lagMs === null) {
     // the sensors never lined up: fall back to whichever one found a rhythm, honestly labelled
-    const single = rates === "sound only" ? sound : rates === "picture only" ? picture : null;
+    // with nothing lining up, one sensor alone must be sure of a clear drip; a weak
+    // single-sensor rhythm is more often noise than a drip the other sensor missed
+    const candidate = rates === "sound only" ? sound : rates === "picture only" ? picture : null;
+    const own = candidate ? findRhythm(rates === "sound only" ? heard : seen, FLOOR_MS) : null;
+    const unmistakable = !!own && own.fitShare >= 0.75 && own.beatsPerGap <= 1.3;
+    const single = candidate && candidate.confidence === "high" && candidate.drops >= 6 && unmistakable ? candidate : null;
     if (single) {
       return {
         ...single,
@@ -156,52 +190,108 @@ export function fuse(seen: number[], heard: number[], durationMs: number): Fused
   // heard-only drops, moved onto the sighting timeline
   const heardSingles = heard.filter((_, i) => !usedSound.has(i)).map((a) => a - lagMs);
 
-  // every candidate on one timeline: a sighting and a sound of the same drop
-  // become one event, then the rhythm keeps whatever lands on the beat
-  type Candidate = { t: number; kind: "both" | "heard" | "seen" };
-  const candidates: Candidate[] = [
-    ...confirmed.map((t) => ({ t, kind: "both" as const })),
-    ...seenSingles.map((t) => ({ t, kind: "seen" as const })),
-  ];
-  for (const t of heardSingles) {
-    const same = candidates.find((c) => c.kind === "seen" && Math.abs(c.t - t) <= PAIR_TOLERANCE_MS * 2);
-    if (same) same.kind = "both";
-    else candidates.push({ t, kind: "heard" });
+  // the drops caught by both sensors, on their own, as a check on the others
+  const anchor = findRhythm(confirmed, FLOOR_MS, "clean");
+  // judged on every seen-and-heard pair, not just the ones that fit, so noise can't flatter itself
+  const quality = analyze("both", confirmed, durationMs);
+  const anchorRate = anchor.intervalMs !== null && confirmed.length >= 3 && quality.confidence !== "low" ? 60000 / anchor.intervalMs : null;
+
+  // drops one sensor missed, filled in from the other where they land on the beat
+  let heardOnly = 0;
+  let seenOnly = 0;
+  if (anchor.intervalMs !== null) {
+    const interval = anchor.intervalMs;
+    const matched = [...anchor.matched];
+    const first = matched[0];
+    const last = matched[matched.length - 1];
+    const tol = tolerance(interval, 1, FLOOR_MS);
+    const fill = (t: number) => {
+      if (t < first - interval / 2 || t > last + interval / 2) return false;
+      if (matched.some((m) => Math.abs(m - t) < interval / 2)) return false;
+      const nearest = matched.reduce((x, y) => (Math.abs(y - t) < Math.abs(x - t) ? y : x));
+      const k = Math.round((t - nearest) / interval);
+      if (k === 0 || Math.abs(t - nearest - k * interval) > tol) return false;
+      matched.push(t);
+      return true;
+    };
+    for (const t of heardSingles) if (fill(t)) heardOnly++;
+    for (const t of seenSingles) if (fill(t)) seenOnly++;
   }
-  candidates.sort((a, b) => a.t - b.t);
+  const fusedInfo = { ...base, confirmed: confirmed.length, heardOnly, seenOnly };
 
-  const rhythm = findRhythm(
-    candidates.map((c) => c.t),
-    FLOOR_MS,
-  );
-  const kinds = rhythm.matched.map((t) => candidates.find((c) => c.t === t)!.kind);
-  const count = (k: Candidate["kind"]) => kinds.filter((x) => x === k).length;
+  /**
+   * both sensors measure the drip and check each other:
+   * - they agree: average them (weighted by drops caught and certainty)
+   * - they disagree: the drops both caught decide which one is right
+   * - only one found a drip: it counts if the drops both caught back it up
+   * - neither did: the drops both caught are the last resort
+   */
+  let rate: number | null = null;
+  let confidence: Measurement["confidence"] = "low";
+  let drops = 0;
+  let reason: string | null = null;
+  const usable = [sound, picture].filter((m) => rateOf(m) !== null);
 
-  const result = analyze("both", rhythm.matched, durationMs);
-  let confidence = result.confidence;
-  let reason = result.reason;
-  if (rates === "disagree") {
-    confidence = "low";
-    reason = "the sound and the picture keep different rhythms: make sure the camera is on the tap you can hear";
-  } else if (count("both") < 4) {
-    confidence = "low";
-    reason = "too few drops were both seen and heard";
-  } else if (rhythm.intervalMs !== null) {
-    // the combined rhythm must match what each sensor found on its own
-    for (const own of [soundRate, pictureRate]) {
-      if (own !== null && Math.abs(60000 / rhythm.intervalMs - own) / own > RATE_AGREEMENT) {
-        confidence = "low";
-        reason = "the combined rhythm doesn't match what each sensor found on its own";
+  if (usable.length === 2 && rates === "agree") {
+    rate = average(usable);
+    drops = Math.max(sound.drops, picture.drops);
+    confidence = confirmed.length >= 3 ? "high" : "medium";
+  } else if (usable.length === 2) {
+    const backed = anchorRate !== null ? usable.filter((m) => close(m.dropsPerMin!, anchorRate, 0.15)) : [];
+    if (backed.length === 1) {
+      rate = backed[0].dropsPerMin!;
+      drops = backed[0].drops;
+      confidence = "medium";
+    } else if (anchorRate !== null) {
+      // neither matches the drops both caught: those are the most reliable evidence
+      rate = anchorRate;
+      drops = confirmed.length + heardOnly + seenOnly;
+      confidence = "medium";
+    } else {
+      reason = "the sound and the picture keep different rhythms: make sure the camera is on the tap you can hear";
+    }
+  } else if (usable.length === 1) {
+    const only = usable[0];
+    if (anchorRate !== null && close(only.dropsPerMin!, anchorRate, 0.15)) {
+      rate = average([only, { ...quality, dropsPerMin: anchorRate, drops: confirmed.length }]);
+      drops = Math.max(only.drops, confirmed.length + heardOnly + seenOnly);
+      confidence = only.confidence === "high" && confirmed.length >= 5 ? "high" : "medium";
+    } else if (anchorRate !== null) {
+      // the drops both caught point elsewhere: trust them over one sensor
+      rate = anchorRate;
+      drops = confirmed.length + heardOnly + seenOnly;
+      confidence = "medium";
+    } else {
+      // too few shared drops to check against: one sensor alone must be unmistakable
+      const own = findRhythm(only === sound ? heard : seen, FLOOR_MS);
+      if (only.confidence === "high" && only.drops >= 6 && own.fitShare >= 0.75 && own.beatsPerGap <= 1.3) {
+        rate = only.dropsPerMin!;
+        drops = only.drops;
+        confidence = "medium";
+      } else {
+        reason = "only one of the sound and the picture found a steady drip, and the other didn't back it up";
       }
     }
+  } else if (anchorRate !== null) {
+    rate = anchorRate;
+    drops = confirmed.length + heardOnly + seenOnly;
+    confidence = "medium";
+  } else {
+    reason = confirmed.length < 3 ? "too few drops were both seen and heard" : (quality.reason ?? "no steady drip found");
   }
 
+  // a sensor's count can include a stray event or two; no more drops than the rate allows
+  if (rate !== null) drops = Math.min(drops, Math.floor((rate * durationMs) / 60000) + 1);
+
   return {
-    ...result,
+    ...quality,
     events: seen.length + heard.length,
-    confidence,
-    reason,
-    fused: { ...base, confirmed: count("both"), heardOnly: count("heard"), seenOnly: count("seen") },
+    drops,
+    dropsPerMin: rate,
+    intervalMs: rate !== null ? 60000 / rate : null,
+    confidence: rate !== null ? confidence : "low",
+    reason: rate !== null ? null : reason,
+    fused: fusedInfo,
   };
 }
 
