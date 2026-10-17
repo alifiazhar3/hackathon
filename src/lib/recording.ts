@@ -60,15 +60,18 @@ export async function analyzePicture(
   video: HTMLVideoElement,
   column: number,
   onProgress: (share: number) => void,
+  /** length in seconds, when the file itself doesn't say (fresh browser recordings) */
+  knownSeconds?: number,
 ): Promise<PictureResult | null> {
-  if (!video.videoWidth || !Number.isFinite(video.duration)) return null;
+  const seconds = Number.isFinite(video.duration) ? video.duration : knownSeconds;
+  if (!video.videoWidth || !seconds) return null;
   const H = Math.round((WIDTH * video.videoHeight) / video.videoWidth);
   const canvas = document.createElement("canvas");
   canvas.width = WIDTH;
   canvas.height = H;
   const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
   const detector = new VideoDropDetector(WIDTH, H, column);
-  const frames = Math.floor(video.duration * FPS);
+  const frames = Math.floor(seconds * FPS);
   let streamFrames = 0;
 
   video.pause();
@@ -86,7 +89,7 @@ export async function analyzePicture(
   onProgress(1);
   video.currentTime = 0;
   return {
-    measurement: analyze("camera", detector.onsets, video.duration * 1000),
+    measurement: analyze("camera", detector.onsets, seconds * 1000),
     seen: [...detector.onsets],
     isStream: streamFrames > frames * 0.5,
   };
