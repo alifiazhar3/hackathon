@@ -40,6 +40,14 @@ function addPlink(buf: Float32Array, at: number, amp: number, r: () => number) {
 }
 
 /** drips at a steady interval with natural jitter; returns the true drop times (s) */
+/** plinks at exactly these times (s), e.g. when drops seen on video land */
+export function addPlinksAt(buf: Float32Array, timesSec: number[], amp: number, r: () => number) {
+  for (const t of timesSec) if (t >= 0 && t < buf.length / SR - 0.1) addPlink(buf, t, amp * (0.75 + r() * 0.5), r);
+}
+
+/** seconds a synthetic video drop takes to fall, so its sound can be placed where it lands */
+export const FALL_SEC = Math.sqrt((2 * 0.12) / 9.81);
+
 export function addDrips(buf: Float32Array, intervalSec: number, amp: number, r: () => number, startSec = 0.3) {
   const times: number[] = [];
   const dur = buf.length / SR;

@@ -1,6 +1,6 @@
 import { findRhythm, tolerance } from "@/lib/rhythm";
 
-export type Source = "mic" | "camera" | "tap";
+export type Source = "mic" | "camera" | "tap" | "both";
 export type Confidence = "high" | "medium" | "low";
 export type Unit = "gal" | "l";
 
@@ -32,9 +32,9 @@ export const PERIODS: [label: string, days: number][] = [
   ["year", 365],
 ];
 
-const EVENT_WORD: Record<Source, string> = { mic: "sounds", camera: "falling objects", tap: "taps" };
+const EVENT_WORD: Record<Source, string> = { mic: "sounds", camera: "falling objects", tap: "taps", both: "drops" };
 /** timing resolution of each source: one video frame, or human tapping */
-export const TIMING_FLOOR_MS: Record<Source, number> = { mic: 20, camera: 40, tap: 60 };
+export const TIMING_FLOOR_MS: Record<Source, number> = { mic: 20, camera: 40, tap: 60, both: 45 };
 
 /**
  * whether a rhythm this strong could come from randomly timed events: the same
