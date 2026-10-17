@@ -65,16 +65,16 @@ function Bottle({
         <g clipPath={`url(#${clipId})`}>
           <path
             d={`M0,${y} Q10,${y - 2.5} 20,${y} T40,${y} V100 H0 Z`}
-            fill="#2563eb"
+            fill="#5b9fd0"
             fillOpacity={0.25}
-            stroke="#2563eb"
+            stroke="#5b9fd0"
             strokeWidth={1.2}
             style={{ transition: "d 0.4s ease" }}
           />
         </g>
       )}
-      <path d={BOTTLE_BODY} fill="none" stroke="#171717" strokeWidth={2.4} strokeLinejoin="round" />
-      {cap && <rect x={13} y={1.5} width={14} height={8.5} rx={2} fill="none" stroke="#171717" strokeWidth={2.4} />}
+      <path d={BOTTLE_BODY} fill="none" stroke="#4d73ad" strokeWidth={2.4} strokeLinejoin="round" />
+      {cap && <rect x={13} y={1.5} width={14} height={8.5} rx={2} fill="none" stroke="#4d73ad" strokeWidth={2.4} />}
     </svg>
   );
 }
@@ -95,8 +95,8 @@ function FlatLiveBottle({ drops, stream, fill }: { drops: LiveDrop[]; stream: bo
 
   return (
     <svg viewBox="0 0 120 196" className="h-56 w-[137px] shrink-0" role="img" aria-label="a tap dripping into a bottle in real time">
-      <rect x={46} y={0} width={28} height={8} fill="#171717" />
-      <rect x={56} y={8} width={8} height={10} fill="#171717" />
+      <rect x={46} y={0} width={28} height={8} fill="#4d73ad" />
+      <rect x={56} y={8} width={8} height={10} fill="#4d73ad" />
 
       {stream ? (
         <line
@@ -105,7 +105,7 @@ function FlatLiveBottle({ drops, stream, fill }: { drops: LiveDrop[]; stream: bo
           x2={60}
           y1={DROP_START_Y - 2}
           y2={surfaceY}
-          stroke="#2563eb"
+          stroke="#5b9fd0"
           strokeWidth={2}
           strokeDasharray="4 3"
         />
@@ -116,7 +116,7 @@ function FlatLiveBottle({ drops, stream, fill }: { drops: LiveDrop[]; stream: bo
               <path
                 className="drip-fall"
                 d="M0,-4 C1.5,-1.5 2.6,0 2.6,1.4 A2.6,2.6 0 0 1 -2.6,1.4 C-2.6,0 -1.5,-1.5 0,-4 Z"
-                fill="#2563eb"
+                fill="#5b9fd0"
                 style={{ "--fall": `${surfaceY - DROP_START_Y}px`, animationDuration: `${FALL_MS}ms` } as CSSProperties}
               />
             </g>
@@ -127,7 +127,7 @@ function FlatLiveBottle({ drops, stream, fill }: { drops: LiveDrop[]; stream: bo
               rx={10}
               ry={2}
               fill="none"
-              stroke="#2563eb"
+              stroke="#5b9fd0"
               style={{ animationDelay: `${FALL_MS}ms`, animationDuration: `${RIPPLE_MS}ms` }}
             />
           </g>
@@ -155,7 +155,7 @@ function FlatGrid({ groups }: { groups: BottleGroup[] }) {
               <Bottle key={i} fill={f} className="w-auto" style={{ height: FLAT_HEIGHT[g.size] }} />
             ))}
           </div>
-          <p className="mt-1 text-xs text-neutral-500">{groupLabel(g)}</p>
+          <p className="mt-1 text-xs text-water-deep">{groupLabel(g)}</p>
         </div>
       ))}
     </div>
@@ -198,15 +198,15 @@ export function BottleSimulation({
     <div className="mt-6">
       <div className="mb-3 flex items-center justify-between gap-3">
         <p className="text-sm">
-          <span className="text-blue-600">{formatBottles(bottles)}</span> bottle{bottles === 1 ? "" : "s"} a {period}
+          <span className="text-water-deep font-semibold">{formatBottles(bottles)}</span> bottle{bottles === 1 ? "" : "s"} a {period}
         </p>
-        <span className="inline-flex border border-neutral-300">
+        <span className="inline-flex overflow-hidden rounded-full border-[3px] border-water-deep">
           {PERIOD_OPTIONS.map(([label]) => (
             <button
               key={label}
               type="button"
               onClick={() => setPeriod(label)}
-              className={`px-2 py-0.5 text-sm ${label === period ? "bg-neutral-900 text-white" : "hover:bg-neutral-100"}`}
+              className={`px-3 py-0.5 text-sm font-medium ${label === period ? "bg-water-deep text-white" : "bg-white text-water-deep hover:bg-sky"}`}
             >
               {label}
             </button>
@@ -216,7 +216,7 @@ export function BottleSimulation({
 
       {webgl ? (
         <SceneBoundary fallback={flat}>
-          <Suspense fallback={<div className="h-80 border border-neutral-200 sm:h-96" />}>
+          <Suspense fallback={<div className="h-80 rounded-2xl border-[3px] border-water-deep bg-sky-soft sm:h-96" />}>
             <BottleScene groups={groups} liveFill={liveFill} drops={drops} stream={stream} />
           </Suspense>
         </SceneBoundary>
@@ -224,7 +224,7 @@ export function BottleSimulation({
         flat
       )}
 
-      <p className="mt-2 text-xs text-neutral-500">
+      <p className="mt-2 text-xs text-water-deep">
         {groups.map(groupLabel).join(" + ")}. a normal bottle is {BOTTLE_ML} ml
         (about 2 cups); each bigger size stands for 10× the one before it, up to 100,000.
       </p>
@@ -233,7 +233,7 @@ export function BottleSimulation({
         <p className="tabular-nums">
           front bottle: {Math.floor(inBottle).toLocaleString("en-US")} / {Math.round(DROPS_PER_BOTTLE).toLocaleString("en-US")} drops
         </p>
-        <p className="mt-1 text-xs text-neutral-500">
+        <p className="mt-1 text-xs text-water-deep">
           {bottlesDone > 0 ? `${bottlesDone} bottle${bottlesDone === 1 ? "" : "s"} filled so far. ` : ""}
           fills one bottle every{" "}
           {minutesPerBottle < 60 ? `${Math.max(1, Math.round(minutesPerBottle))} min` : formatDuration(minutesPerBottle / 1440)}.{" "}

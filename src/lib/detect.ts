@@ -39,12 +39,12 @@ export class Trace {
     const offset = this.size - this.values.length;
     const y = (v: number) => h - 2 - (v / max) * (h - 4);
 
-    ctx.fillStyle = "#2563eb";
+    ctx.fillStyle = "#8ec3e3";
     this.hits.forEach((hit, i) => {
       if (hit) ctx.fillRect((offset + i) * step - 1, 0, 2, h);
     });
 
-    ctx.strokeStyle = "#d4d4d4";
+    ctx.strokeStyle = "#c8e1f2";
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
@@ -62,7 +62,7 @@ export class Trace {
     });
     ctx.stroke();
 
-    ctx.strokeStyle = "#171717";
+    ctx.strokeStyle = "#4d73ad";
     ctx.setLineDash([]);
     ctx.beginPath();
     this.values.forEach((v, i) => {
