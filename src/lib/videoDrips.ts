@@ -65,15 +65,22 @@ const SAME_DROP_MS = 250;
 const USUAL_WINDOW = 60;
 
 /** a stream must cover this share of the frame height in one unbroken run */
-const STREAM_MIN_LENGTH = 0.4;
+const STREAM_MIN_LENGTH = 0.15;
 /** ...stay this close to a straight vertical line (px) */
-const STREAM_MAX_WOBBLE = 3;
+const STREAM_MAX_WOBBLE = 8;
 /** ...and show up in this share of recent frames */
-const STREAM_MIN_SHARE = 0.7;
+const STREAM_MIN_SHARE = 0.5;
 /** a shimmering stream has gaps in any one frame, so combine this many */
-const STREAM_MEMORY_FRAMES = 3;
+const STREAM_MEMORY_FRAMES = 4;
 /** the straight-line test rejects random noise, so a stream can use a lower change threshold */
-const STREAM_THRESHOLD_SHARE = 0.6;
+const STREAM_THRESHOLD_SHARE = 0.4;
+/** rows along a stream's line must be at least this full... */
+const STREAM_MIN_DENSITY = 0.6;
+/** a row must be on the line in at least this share of the last STREAM_PERSIST_FRAMES frames */
+const STREAM_MIN_PERSIST = 0.5;
+const STREAM_PERSIST_FRAMES = 10;
+/** ...and this much fuller than grain alone would make them */
+const STREAM_OVER_GRAIN_DENSITY = 0.35;
 const STREAM_WINDOW = 30;
 
 type Blob = { x: number; y: number; area: number };
@@ -86,11 +93,15 @@ export class VideoDropDetector {
   private frames: { gray: Uint8Array; t: number; mean: number }[] = [];
   private noiseSamples: number[] = [];
   private threshold = MIN_DIFF;
+  /** the camera's own frame-to-frame grain, learned at the start */
+  private sigma = MIN_DIFF / 5;
   private tracks: Track[] = [];
   private startedAt: number | null = null;
   private x0: number;
   private x1: number;
   private streamFrames: boolean[] = [];
+  /** which rows were on the stream line in recent frames */
+  private lineHistory: Uint8Array[] = [];
   /** frame number when each column pixel last changed */
   private lastChanged: Int32Array | null = null;
   private frameNo = 0;
@@ -140,6 +151,7 @@ export class VideoDropDetector {
     if (this.noiseSamples.length) {
       const sorted = [...this.noiseSamples].sort((a, b) => a - b);
       const sigma = sorted[Math.floor(sorted.length / 2)] * 1.4826;
+      this.sigma = sigma;
       this.threshold = Math.max(MIN_DIFF, sigma * 5);
       this.noiseSamples = [];
       // now that the camera's noise is known, look for drops in the first second too
@@ -165,37 +177,82 @@ export class VideoDropDetector {
     return this.streamFrames.filter(Boolean).length / this.streamFrames.length >= STREAM_MIN_SHARE;
   }
 
-  /** a long, thin, straight run of shimmering pixels down the column */
+  /**
+   * a long, thin run of shimmering pixels down one line of the column. the
+   * line is where activity piles up; a row counts if it has activity within
+   * a sway's width of that line. camera grain lands there too, so the rows on
+   * the line must be far denser than grain alone would make them.
+   */
   private looksLikeStream(mask: Uint8Array, w: number, h: number) {
-    const centers: number[] = [];
-    let run = 0;
-    let longest = 0;
-    let gap = 0;
+    // the line: the x where activity piles up most (smoothed over a few pixels)
+    const perX = new Float64Array(w);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (mask[y * w + x]) perX[x]++;
+    let line = 0;
+    let lineScore = -1;
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let d = -2; d <= 2; d++) sum += perX[x + d] ?? 0;
+      if (sum > lineScore) {
+        lineScore = sum;
+        line = x;
+      }
+    }
+    const lo = Math.max(0, line - STREAM_MAX_WOBBLE);
+    const hi = Math.min(w - 1, line + STREAM_MAX_WOBBLE);
+    const band = hi - lo + 1;
+
+    // how often grain alone would put a pixel in the band, from activity outside it
+    let outside = 0;
+    for (let x = 0; x < w; x++) if (x < lo || x > hi) outside += perX[x];
+    const grainPerPixel = outside / Math.max(1, h * (w - band));
+    const grainChance = 1 - (1 - grainPerPixel) ** band;
+
+    // a stream's line is busy frame after frame; a falling drop crosses each
+    // spot only briefly. so a row counts only if it was on the line in at least
+    // half of the recent frames (and more often than grain would put it there)
+    const hits = new Uint8Array(h);
     for (let y = 0; y < h; y++) {
-      let n = 0;
-      let sx = 0;
-      for (let x = 0; x < w; x++) {
+      for (let x = lo; x <= hi; x++) {
         if (mask[y * w + x]) {
-          n++;
-          sx += x;
+          hits[y] = 1;
+          break;
         }
       }
-      if (n > 0 && n <= w * 0.5) {
-        centers.push(sx / n);
-        run += gap + 1;
+    }
+    this.lineHistory.push(hits);
+    if (this.lineHistory.length > STREAM_PERSIST_FRAMES) this.lineHistory.shift();
+    const persistNeeded = Math.max(STREAM_MIN_PERSIST, grainChance + 0.3);
+    const onLine: boolean[] = [];
+    for (let y = 0; y < h; y++) {
+      let n = 0;
+      for (const past of this.lineHistory) n += past[y] ?? 0;
+      onLine.push(n / this.lineHistory.length >= persistNeeded);
+    }
+    let bestLength = 0;
+    let bestDensity = 0;
+    let runStart = -1;
+    let runHits = 0;
+    let gap = 0;
+    for (let y = 0; y <= h; y++) {
+      const hit = y < h && onLine[y];
+      if (hit) {
+        if (runStart < 0) runStart = y;
+        runHits++;
         gap = 0;
-      } else if (run > 0 && gap < 3) {
+      } else if (runStart >= 0 && gap < 3 && y < h) {
         gap++;
-      } else {
-        run = 0;
+      } else if (runStart >= 0) {
+        const length = y - gap - runStart;
+        if (length > bestLength) {
+          bestLength = length;
+          bestDensity = runHits / length;
+        }
+        runStart = -1;
+        runHits = 0;
         gap = 0;
       }
-      longest = Math.max(longest, run);
     }
-    if (longest < h * STREAM_MIN_LENGTH || centers.length < 2) return false;
-    const mean = centers.reduce((a, b) => a + b, 0) / centers.length;
-    const sd = Math.sqrt(centers.reduce((a, b) => a + (b - mean) ** 2, 0) / centers.length);
-    return sd <= STREAM_MAX_WOBBLE;
+    return bestLength >= h * STREAM_MIN_LENGTH && bestDensity >= Math.max(STREAM_MIN_DENSITY, grainChance + STREAM_OVER_GRAIN_DENSITY);
   }
 
   /** average of a 2 × 2 block, which halves the camera's pixel noise */

@@ -1,24 +1,26 @@
 /**
- * finds the steady drip rhythm in a list of detected events.
+ * finds the drip rhythm in a list of detected events.
  *
- * real drips repeat at a near-constant interval; background noise doesn't.
- * we try candidate intervals taken from the gaps between events, and for each
- * one find the longest chain of events spaced by whole multiples of it
- * (a multiple means some drops in between were missed). gaps that skip drops
- * cost a little, so the true interval beats its halves and doubles.
+ * real drips repeat at a roughly steady interval, but not a perfect one: the
+ * gap from one drop to the next wobbles by 10–20%, and the rate can drift a
+ * little over a clip. so instead of demanding drops land exactly on a beat,
+ * this looks at the gaps between consecutive events. each gap should be about
+ * one beat long, or two or three if drops were missed. every candidate beat
+ * length is scored by how many gaps fit it (a one-beat gap counts fully, a
+ * two-beat gap half, and so on), so the true beat wins over its half and its
+ * double. the rate is the total time of the fitting gaps over their beats.
  */
 
 const MIN_INTERVAL_MS = 120;
 const MAX_INTERVAL_MS = 60_000;
-/** how many missed drops in a row a chain may bridge */
-const MAX_SKIP = 4;
-const SKIP_PENALTY = 0.6;
-/** how many of the most common gaps between events to try as the drip interval */
-const MAX_CANDIDATES = 30;
-/** a restarted rhythm counts if it has at least this many drops... */
-const MIN_SEGMENT = 4;
-/** ...and the rhythm may restart at most this many times */
-const MAX_SEGMENTS = 3;
+/** a gap may span up to this many beats (drops missed in between) */
+const MAX_SKIP = 3;
+/** a gap fits if it is within this share of a beat from a whole number of beats */
+const GAP_FIT = 0.3;
+/** how far a single drop may land from where the rhythm predicts, as a share of an interval */
+export const TOLERANCE_SHARE = 0.2;
+/** with stray events about, prefer a beat twice as long if it scores at least this share as well */
+const DOUBLE_PREFERENCE = 0.6;
 
 export type Rhythm = {
   /** typical time between drops, or null if no rhythm was found */
@@ -27,13 +29,17 @@ export type Rhythm = {
   matched: number[];
   /** drops expected between the first and last matched event */
   expected: number;
-  /** timing spread of matched events, relative to the interval */
+  /** drop-to-drop timing spread, relative to the interval */
   jitter: number;
-  /** chain strength: matched events minus a penalty for each missed drop */
+  /** strength of the rhythm: fitting gaps, each weighted by 1 / beats it spans */
   score: number;
+  /** share of the gaps between consecutive events that fit the rhythm (random events fit about a third) */
+  fitShare: number;
+  /** average beats spanned by a fitting gap: near 1 for a drip, higher for noise that fits by chance */
+  beatsPerGap: number;
 };
 
-const NONE: Rhythm = { intervalMs: null, matched: [], expected: 0, jitter: 0, score: 0 };
+const NONE: Rhythm = { intervalMs: null, matched: [], expected: 0, jitter: 0, score: 0, fitShare: 0, beatsPerGap: 0 };
 
 /**
  * how far a drop may land from where the rhythm predicts. floorMs covers the
@@ -41,150 +47,117 @@ const NONE: Rhythm = { intervalMs: null, matched: [], expected: 0, jitter: 0, sc
  * people tapping along are less exact than a microphone.
  */
 export function tolerance(intervalMs: number, skips: number, floorMs = 20) {
-  return Math.max(floorMs, 0.04 * intervalMs) * Math.sqrt(skips);
+  return Math.max(floorMs, TOLERANCE_SHARE * intervalMs) * Math.sqrt(skips);
 }
 
-type Chain = { score: number; indices: number[]; steps: number[] };
-
-function bestChain(times: number[], interval: number, floorMs: number): Chain {
-  const n = times.length;
-  const score = new Float64Array(n).fill(1);
-  const prev = new Int32Array(n).fill(-1);
-  const step = new Int32Array(n);
-
-  for (let i = 1; i < n; i++) {
-    for (let j = i - 1; j >= 0; j--) {
-      const gap = times[i] - times[j];
-      if (gap > (MAX_SKIP + 0.5) * interval) break;
-      const m = Math.round(gap / interval);
-      if (m < 1) continue;
-      if (Math.abs(gap - m * interval) > tolerance(interval, m, floorMs)) continue;
-      const s = score[j] + 1 - SKIP_PENALTY * (m - 1);
-      if (s > score[i]) {
-        score[i] = s;
-        prev[i] = j;
-        step[i] = m;
-      }
-    }
-  }
-
-  let end = 0;
-  for (let i = 1; i < n; i++) if (score[i] > score[end]) end = i;
-  const indices: number[] = [];
-  const steps: number[] = [];
-  for (let i = end; i >= 0; i = prev[i]) {
-    indices.push(i);
-    steps.push(step[i]);
-  }
-  indices.reverse();
-  steps.reverse();
-  return { score: score[end], indices, steps };
+/** how many beats a gap spans at this interval, or 0 if it doesn't fit */
+function beatsIn(gap: number, interval: number, floorMs: number) {
+  const k = Math.round(gap / interval);
+  if (k < 1 || k > MAX_SKIP) return 0;
+  const off = Math.abs(gap - k * interval);
+  return off <= Math.max(floorMs, GAP_FIT * interval) ? k : 0;
 }
 
-/** least-squares slope of event times against their drop numbers */
-function fitInterval(times: number[], numbers: number[]) {
-  const n = times.length;
-  const mx = numbers.reduce((a, b) => a + b, 0) / n;
-  const my = times.reduce((a, b) => a + b, 0) / n;
-  let sxy = 0;
-  let sxx = 0;
-  for (let i = 0; i < n; i++) {
-    sxy += (numbers[i] - mx) * (times[i] - my);
-    sxx += (numbers[i] - mx) ** 2;
+/**
+ * how much a gap spanning k beats counts. with stray events about, a skipped
+ * beat counts little (1 / k), so noise between drops can't fake a faster beat.
+ * events already confirmed by two sensors have no strays, so a skipped beat
+ * can count more, keeping the true beat from losing to its double.
+ */
+export type SkipWeighting = "strict" | "clean";
+const weight = (k: number, w: SkipWeighting) => (w === "clean" ? [0, 1, 0.8, 0.6][k] : 1 / k);
+
+function scoreOf(gaps: number[], interval: number, floorMs: number, w: SkipWeighting) {
+  let score = 0;
+  for (const g of gaps) {
+    const k = beatsIn(g, interval, floorMs);
+    if (k) score += weight(k, w);
   }
-  const slope = sxx > 0 ? sxy / sxx : 0;
-  const intercept = my - slope * mx;
-  let residual = 0;
-  for (let i = 0; i < n; i++) residual += (times[i] - (intercept + slope * numbers[i])) ** 2;
-  return { slope, rms: Math.sqrt(residual / n) };
+  return score;
 }
 
-export function findRhythm(events: number[], floorMs = 20): Rhythm {
+export function findRhythm(events: number[], floorMs = 20, skips: SkipWeighting = "strict"): Rhythm {
   const times = [...events].sort((a, b) => a - b);
   if (times.length < 3) return NONE;
+  const gaps = times.slice(1).map((t, i) => t - times[i]);
 
-  // candidate intervals: gaps between nearby events, merged when within 2%
-  const gaps: number[] = [];
-  for (let i = 0; i < times.length; i++) {
-    for (let j = i + 1; j < Math.min(times.length, i + 5); j++) {
-      const g = times[j] - times[i];
-      if (g >= MIN_INTERVAL_MS && g <= MAX_INTERVAL_MS) gaps.push(g);
-    }
-  }
-  gaps.sort((a, b) => a - b);
-  const clusters: { sum: number; count: number; first: number }[] = [];
+  // candidate beats: each gap might be one, two or three beats long
+  const candidates = new Set<number>();
   for (const g of gaps) {
-    const last = clusters[clusters.length - 1];
-    if (last && g <= last.first * 1.02) {
-      last.sum += g;
-      last.count++;
-    } else {
-      clusters.push({ sum: g, count: 1, first: g });
+    for (let k = 1; k <= MAX_SKIP; k++) {
+      const c = Math.round(g / k);
+      if (c >= MIN_INTERVAL_MS && c <= MAX_INTERVAL_MS) candidates.add(c);
     }
   }
-  // a real drip repeats its interval many times, so only the most common
-  // intervals are worth trying (this keeps noisy rooms fast)
-  const candidates = clusters
-    .sort((a, b) => b.count - a.count)
-    .slice(0, MAX_CANDIDATES)
-    .map((c) => c.sum / c.count);
-
-  let best: { chain: Chain; interval: number } | null = null;
+  let best = 0;
+  let bestScore = 0;
   for (const c of candidates) {
-    const chain = bestChain(times, c, floorMs);
-    if (!best || chain.score > best.chain.score + 1e-9) best = { chain, interval: c };
+    const s = scoreOf(gaps, c, floorMs, skips);
+    // on a tie, prefer the longer beat (a shorter one only fits by skipping)
+    if (s > bestScore + 1e-9 || (Math.abs(s - bestScore) <= 1e-9 && c > best)) {
+      bestScore = s;
+      best = c;
+    }
   }
-  if (!best || best.chain.indices.length < 3) return NONE;
+  if (!best) return NONE;
 
-  // the rhythm can restart after a jump (a bumped phone, a looped video): look
-  // for more runs at the same interval among the events left over
-  const segments: { times: number[]; numbers: number[] }[] = [];
-  let rest = times;
-  let chain = best.chain;
+  // stray events between drops can make half the true beat look best. if a
+  // beat twice as long explains the events nearly as well, it is the drip.
+  if (skips === "strict" && best * 2 <= MAX_INTERVAL_MS) {
+    let doubleScore = 0;
+    let double = best * 2;
+    for (const c of candidates) {
+      if (Math.abs(c - best * 2) > best * 0.2) continue;
+      const sc = scoreOf(gaps, c, floorMs, skips);
+      if (sc > doubleScore) {
+        doubleScore = sc;
+        double = c;
+      }
+    }
+    if (doubleScore >= bestScore * DOUBLE_PREFERENCE) best = double;
+  }
+
+
+  // refine: total time of the fitting gaps over the beats they span, twice
+  let interval = best;
+  for (let pass = 0; pass < 2; pass++) {
+    let span = 0;
+    let beats = 0;
+    for (const g of gaps) {
+      const k = beatsIn(g, interval, floorMs);
+      if (k) {
+        span += g;
+        beats += k;
+      }
+    }
+    if (beats) interval = span / beats;
+  }
+
+  const matchedSet = new Set<number>();
+  const perBeat: number[] = [];
   let score = 0;
-  while (segments.length < MAX_SEGMENTS) {
-    const segTimes = chain.indices.map((i) => rest[i]);
-    const numbers: number[] = [0];
-    for (let k = 1; k < chain.steps.length; k++) numbers.push(numbers[k - 1] + chain.steps[k]);
-    segments.push({ times: segTimes, numbers });
-    score += chain.score;
-    const used = new Set(chain.indices);
-    rest = rest.filter((_, i) => !used.has(i));
-    if (rest.length < MIN_SEGMENT) break;
-    // one tap drips one rhythm at a time, so a restart can only happen
-    // before or after the runs found so far, never in the middle of one
-    const spans = segments.map((seg) => [seg.times[0], seg.times[seg.times.length - 1]]);
-    rest = rest.filter((t) => spans.every(([a, b]) => t < a || t > b));
-    if (rest.length < MIN_SEGMENT) break;
-    chain = bestChain(rest, best.interval, floorMs);
-    if (chain.indices.length < Math.max(MIN_SEGMENT, segments[0].times.length * 0.25)) break;
-  }
+  let beats = 0;
+  gaps.forEach((g, i) => {
+    const k = beatsIn(g, interval, floorMs);
+    if (!k) return;
+    matchedSet.add(i);
+    matchedSet.add(i + 1);
+    perBeat.push(g / k);
+    score += weight(k, skips);
+    beats += k;
+  });
+  if (perBeat.length < 2) return NONE;
 
-  // refine the interval with one straight-line slope shared by every run
-  let sxy = 0;
-  let sxx = 0;
-  for (const seg of segments) {
-    const mx = seg.numbers.reduce((a, b) => a + b, 0) / seg.numbers.length;
-    const my = seg.times.reduce((a, b) => a + b, 0) / seg.times.length;
-    seg.numbers.forEach((n, i) => {
-      sxy += (n - mx) * (seg.times[i] - my);
-      sxx += (n - mx) ** 2;
-    });
-  }
-  const intervalMs = sxx > 0 && sxy > 0 ? sxy / sxx : best.interval;
-  let residual = 0;
-  let count = 0;
-  for (const seg of segments) {
-    const fit = fitInterval(seg.times, seg.numbers);
-    residual += fit.rms ** 2 * seg.times.length;
-    count += seg.times.length;
-  }
-
+  const matched = [...matchedSet].sort((a, b) => a - b).map((i) => times[i]);
+  const mean = perBeat.reduce((a, b) => a + b, 0) / perBeat.length;
+  const sd = Math.sqrt(perBeat.reduce((a, g) => a + (g - mean) ** 2, 0) / perBeat.length);
   return {
-    intervalMs,
-    matched: segments.flatMap((seg) => seg.times).sort((a, b) => a - b),
-    expected: segments.reduce((sum, seg) => sum + seg.numbers[seg.numbers.length - 1] + 1, 0),
-    jitter: Math.sqrt(residual / count) / intervalMs,
+    intervalMs: interval,
+    matched,
+    expected: Math.round((matched[matched.length - 1] - matched[0]) / interval) + 1,
+    jitter: sd / interval,
     score,
+    fitShare: perBeat.length / gaps.length,
+    beatsPerGap: beats / perBeat.length,
   };
 }

@@ -642,6 +642,8 @@ function FusedSummary({ m }: { m: Fused }) {
   const fmt = (x: Measurement) => (x.dropsPerMin === null || x.confidence === "low" ? "unsure" : `${formatRate(x.dropsPerMin)} / min`);
   return (
     <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
+      {f.lagMs !== null && (
+        <>
       <div className="rounded-xl bg-leaf-light p-2">
         <span className="block text-lg font-semibold text-leaf-deep">{f.confirmed}</span>
         seen and heard
@@ -654,9 +656,11 @@ function FusedSummary({ m }: { m: Fused }) {
         <span className="block text-lg font-semibold text-water-deep">{f.seenOnly}</span>
         seen only, on the beat
       </div>
+        </>
+      )}
       <p className="col-span-3 text-left text-water-deep">
         sound alone: {fmt(f.sound)} · picture alone: {fmt(f.picture)}
-        {f.rates === "agree" ? " · they agree" : ""}
+        {f.rates === "agree" ? " · they agree, so drippy uses their average" : ""}
         {f.lagMs !== null ? ` · each drop is heard ${Math.round(f.lagMs)} ms after it's seen` : ""}
       </p>
     </div>

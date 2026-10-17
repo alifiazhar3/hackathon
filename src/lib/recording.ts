@@ -91,7 +91,7 @@ export async function analyzePicture(
   return {
     measurement: analyze("camera", detector.onsets, seconds * 1000),
     seen: [...detector.onsets],
-    isStream: streamFrames > frames * 0.5,
+    isStream: streamFrames > frames * 0.3,
   };
 }
 
