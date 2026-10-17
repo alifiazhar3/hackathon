@@ -1,4 +1,3 @@
-# Logs
 logs
 *.log
 npm-debug.log*
@@ -9,11 +8,9 @@ lerna-debug.log*
 
 node_modules
 dist
-.env
-.env.*
-!.env.example
+dist-ssr
+*.local
 
-# Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -23,3 +20,4 @@ dist
 *.njsproj
 *.sln
 *.sw?
+.env
