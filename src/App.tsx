@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
   analyze,
   streamMeasurement,
-  TIMING_FLOOR_MS,
   FIX_HORIZON_DAYS,
   formatDuration,
   formatMoney,
@@ -15,12 +14,11 @@ import {
   type Source,
   type Unit,
 } from "@/lib/drips";
-import { COLUMN_HALF_WIDTH, combinedSampler, openCamera, type SamplerStatus } from "@/lib/samplers";
-import { fuse, fuseStream, type Fused } from "@/lib/fusion";
-import { findRhythm } from "@/lib/rhythm";
-import { useDropSession } from "@/lib/useDropSession";
+import { COLUMN_HALF_WIDTH } from "@/lib/samplers";
+import type { Fused } from "@/lib/fusion";
+import { lengthProblem, MAX_SECONDS, MIN_SECONDS, openCameraAndMic, startRecording } from "@/lib/recorder";
 import { BottleSimulation } from "@/BottleSimulation";
-import { RecordingTester } from "@/RecordingTester";
+import { RecordingTester, type Recorded } from "@/RecordingTester";
 import {
   BottlePic,
   CalendarPic,
@@ -53,19 +51,10 @@ import {
   type Urgency,
 } from "@/lib/urgency";
 
-type Mode = "idle" | "mic" | "camera" | "both" | "tap" | "file";
+type Mode = "idle" | "record" | "tap" | "file";
 type RepairKind = "diy" | "plumber";
 
 const SOURCE_LABEL: Record<Source, string> = { mic: "sound", camera: "camera", tap: "taps", both: "camera + mic" };
-
-const STATUS_TEXT: Record<SamplerStatus, string> = {
-  calibrating: "learning the background first (2 s). keep things as they are.",
-  listening: "listening. each blue tick is a sound shaped like a drop; only ones that keep a steady rhythm count.",
-  watching: "watching the blue column. a drop counts only when something small falls straight down it and speeds up.",
-  unsteady: "the whole picture is moving. hold the camera still or rest it on something.",
-  stream: "that looks like a steady stream, not drops. checking for a few seconds…",
-  both: "watching and listening. a drop counts when it's seen falling and heard landing, or when one of them catches it right on the beat.",
-};
 
 function errorText(e: unknown) {
   if (e instanceof DOMException && e.name === "NotAllowedError") return "access was blocked";
@@ -104,40 +93,27 @@ export default function App() {
   /** what camera + mic made of a stream, e.g. "seen and heard as a steady stream" */
   const [streamNote, setStreamNote] = useState("");
 
-  const session = useDropSession({
-    minMs: 30000,
-    maxMs: 90000,
-    minDrops: 6,
-    onDone: (source, onsets, durationMs, stream, channels) => {
-      setMode("idle");
-      if (source === "both" && channels) {
-        const judged = fuseStream(stream || channels.pictureStream, channels.soundSteady);
-        if (judged.stream) {
-          setStreamNote(judged.note);
-          setStreamFound(true);
-        } else {
-          setResult(fuse(channels.seen, channels.heard, durationMs));
-        }
-        return;
-      }
-      setStreamNote("");
-      if (stream) setStreamFound(true);
-      else setResult(analyze(source, onsets, durationMs));
-    },
-  });
+  // recording a 10–30 s clip in the browser, then analyzing it like an uploaded video
+  const streamRef = useRef<MediaStream | null>(null);
+  const recorderRef = useRef<ReturnType<typeof startRecording> | null>(null);
+  const [recordingSince, setRecordingSince] = useState<number | null>(null);
+  const [now, setNow] = useState(0);
+  const [recorded, setRecorded] = useState<Recorded | null>(null);
+  const [tooShort, setTooShort] = useState("");
+  const elapsed = recordingSince === null ? 0 : Math.max(0, now - recordingSince) / 1000;
 
-  // drops so far that fit a steady rhythm (sounds that don't fit are ignored)
-  const live = useMemo(
-    () => findRhythm(session.onsets, TIMING_FLOOR_MS[mode === "camera" ? "camera" : "mic"]),
-    [session.onsets, mode],
-  );
-  // with camera + mic, the live count is the combined one
-  const liveFused = useMemo(
-    () => (mode === "both" && session.channels ? fuse(session.channels.seen, session.channels.heard, Math.max(1, session.elapsed)) : null),
+  // tick the timer while recording
+  useEffect(() => {
+    if (recordingSince === null) return;
+    const timer = window.setInterval(() => setNow(performance.now()), 100);
+    return () => window.clearInterval(timer);
+  }, [recordingSince]);
+
+  // stop on our own at the limit
+  useEffect(() => {
+    if (recordingSince !== null && elapsed >= MAX_SECONDS) void stopRecording();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [session.channels, mode],
-  );
-  const liveDrops = liveFused ? liveFused.drops : live.matched.length;
+  }, [elapsed]);
 
   function closeCamera() {
     closeCameraRef.current?.();
@@ -145,7 +121,12 @@ export default function App() {
   }
 
   function reset(next: Mode) {
-    session.cancel();
+    void recorderRef.current?.stop();
+    recorderRef.current = null;
+    streamRef.current = null;
+    setRecordingSince(null);
+    setRecorded(null);
+    setTooShort("");
     closeCamera();
     setAiming(false);
     setResult(null);
@@ -156,34 +137,50 @@ export default function App() {
     setMode(next);
   }
 
-  /** camera and microphone together: open the camera first so the user can aim */
-  async function watchAndListen() {
-    reset("both");
+  /** opens the camera and mic so the user can aim, then records a 10–30 second clip */
+  async function startRecordFlow() {
+    reset("record");
     try {
-      closeCameraRef.current = await openCamera(videoRef.current!);
+      const opened = await openCameraAndMic(videoRef.current!);
+      streamRef.current = opened.stream;
+      closeCameraRef.current = opened.close;
       setAiming(true);
     } catch (e) {
       setMode("idle");
-      setFailure({ source: "both", message: `camera unavailable: ${errorText(e)}` });
+      setFailure({ source: "both", message: `camera or microphone unavailable: ${errorText(e)}` });
     }
   }
 
-  /** the user taps the video where the drops fall; counting starts there */
-  async function aimAt(e: MouseEvent<HTMLDivElement>) {
-    if (!aiming || !videoRef.current) return;
+  /** the user taps the picture where the drops fall; recording starts */
+  function aimAt(e: MouseEvent<HTMLDivElement>) {
+    if (!aiming || !streamRef.current) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = Math.min(0.95, Math.max(0.05, (e.clientX - rect.left) / rect.width));
     setColumn(x);
     setAiming(false);
-    const close = closeCameraRef.current ?? (() => {});
-    closeCameraRef.current = null;
-    try {
-      session.start(await combinedSampler(videoRef.current, x, close), "both");
-    } catch (err) {
-      close();
-      setMode("idle");
-      setFailure({ source: "both", message: `microphone unavailable: ${errorText(err)}` });
+    recorderRef.current = startRecording(streamRef.current);
+    const t = performance.now();
+    setNow(t);
+    setRecordingSince(t);
+  }
+
+  /** ends the recording; a 10–30 s clip is analyzed straight away */
+  async function stopRecording() {
+    const recorder = recorderRef.current;
+    if (!recorder || recordingSince === null) return;
+    recorderRef.current = null;
+    const seconds = (performance.now() - recordingSince) / 1000;
+    setRecordingSince(null);
+    const blob = await recorder.stop();
+    closeCamera();
+    streamRef.current = null;
+    const issue = lengthProblem(seconds, "recording");
+    if (issue) {
+      setTooShort(issue);
+      return;
     }
+    setRecorded({ blob, column, seconds: Math.min(seconds, MAX_SECONDS) });
+    setMode("file");
   }
 
   function finishCup() {
@@ -205,10 +202,6 @@ export default function App() {
     const t0 = taps[0] ?? 0;
     setResult(analyze("tap", taps.map((t) => t - t0), taps.length ? taps[taps.length - 1] - t0 : 0));
     setMode("idle");
-  }
-
-  function stopEarly() {
-    session.finish();
   }
 
   function cancel() {
@@ -257,9 +250,9 @@ export default function App() {
           {mode === "idle" && !fallbackFrom && !streamFound && (
             <>
               <p className="text-sm text-water-ink/80">
-                for the most accurate count, use the camera and mic together: prop your phone up facing the tap, close
-                enough to hear the drops land. drippy learns the background for 2 seconds, then watches and listens for 30
-                seconds, longer for slow drips.
+                record a {MIN_SECONDS}–{MAX_SECONDS} second clip of the drip: prop your phone up facing the tap, close enough
+                to hear the drops land, and tap the picture where they fall. drippy then checks every frame and every sound
+                and combines them.
               </p>
               <div className="mt-4 grid grid-cols-1 gap-3 min-[400px]:grid-cols-2">
                 <div className="min-[400px]:col-span-2">
@@ -271,29 +264,51 @@ export default function App() {
                         <MicPic className="-ml-2 h-10 w-10" />
                       </span>
                     }
-                    label={result ? "measure again: camera + mic" : "camera + mic"}
-                    hint="most accurate: every drop seen and heard"
-                    onClick={watchAndListen}
+                    label={result ? "record again" : `record ${MIN_SECONDS}–${MAX_SECONDS} seconds`}
+                    hint="camera + mic: every drop seen and heard"
+                    onClick={startRecordFlow}
                   />
                 </div>
                 <Choice picture={<FingerPic />} label="tap manually" hint="tap along with each drop" onClick={startTapping} />
-                <Choice picture={<FilmPic />} label="test a recording" hint="check a video or audio file" onClick={() => reset("file")} />
+                <Choice picture={<FilmPic />} label="upload a video" hint={`a ${MIN_SECONDS}–${MAX_SECONDS} s clip with sound`} onClick={() => reset("file")} />
               </div>
             </>
           )}
 
           {mode === "file" && (
             <RecordingTester
+              key={recorded ? `recorded-${recorded.blob.size}` : "upload"}
+              recorded={recorded}
               onUse={(m) => {
+                setRecorded(null);
                 setResult(m);
                 setMode("idle");
               }}
-              onStream={() => {
+              onStream={(note) => {
+                setRecorded(null);
                 setMode("idle");
+                setStreamNote(note ?? "");
                 setStreamFound(true);
               }}
+              onRecord={startRecordFlow}
               onCancel={cancel}
             />
+          )}
+
+          {mode === "record" && tooShort && (
+            <div className="rounded-2xl border-[3px] border-coral bg-coral-light p-4">
+              <p className="text-sm font-semibold text-coral-deep">{tooShort}.</p>
+              <p className="mt-1 text-sm">
+                please record for {MIN_SECONDS}–{MAX_SECONDS} seconds, or upload a {MIN_SECONDS}–{MAX_SECONDS} second video.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button primary onClick={startRecordFlow}>
+                  record again
+                </Button>
+                <Button onClick={() => reset("file")}>upload a video</Button>
+                <Button onClick={cancel}>cancel</Button>
+              </div>
+            </div>
           )}
 
           {fallbackFrom && (
@@ -302,7 +317,8 @@ export default function App() {
               blocked={failure !== null}
               message={failure?.message ?? lowResult?.reason ?? ""}
               estimate={lowResult?.dropsPerMin ?? null}
-              onBoth={watchAndListen}
+              onBoth={startRecordFlow}
+              onUpload={() => reset("file")}
               onTap={startTapping}
               onUseEstimate={() => setUseEstimate(true)}
             />
@@ -336,7 +352,7 @@ export default function App() {
                     full
                   </Button>
                 )}
-                <Button onClick={watchAndListen}>watch again</Button>
+                <Button onClick={startRecordFlow}>record again</Button>
                 <Button onClick={cancel}>cancel</Button>
               </div>
               {cupStartedAt !== null && <CupTimer startedAt={cupStartedAt} />}
@@ -345,7 +361,7 @@ export default function App() {
 
           <div
             className={
-              mode === "camera" || mode === "both"
+              mode === "record" && !tooShort
                 ? `relative mb-3 overflow-hidden rounded-2xl border-[3px] border-water-deep ${aiming ? "cursor-crosshair" : ""}`
                 : "hidden"
             }
@@ -367,7 +383,7 @@ export default function App() {
             )}
           </div>
 
-          {(mode === "camera" || mode === "both") && aiming && (
+          {mode === "record" && aiming && (
             <>
               <p className="text-xs text-water-deep">
                 point the camera at the tap so the drops fall through the picture. keep at least a hand's width of the fall
@@ -379,30 +395,33 @@ export default function App() {
             </>
           )}
 
-          {(mode === "mic" || ((mode === "camera" || mode === "both") && !aiming)) && (
+          {mode === "record" && recordingSince !== null && (
             <>
-              <canvas ref={session.canvasRef} className="block h-20 w-full rounded-xl border-2 border-water-light bg-sky-soft" />
-              <div className="mt-3 flex items-center justify-between">
-                <span className="flex items-center gap-2">
-                  <DropPic className="bob h-7 w-7" />
-                  <span className="text-2xl font-semibold tabular-nums text-water-deep">{liveDrops}</span>
-                  <span className="text-sm">
-                    drop{liveDrops === 1 ? "" : "s"}
-                    <span className="text-water-deep">
-                      {" "}
-                      ·{" "}
-                      {liveFused
-                        ? `${liveFused.fused.confirmed} seen + heard`
-                        : `${session.onsets.length} ${mode === "mic" ? "drop-like sounds" : "falling objects"}`}
-                    </span>
-                  </span>
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-2 text-sm font-semibold text-coral-deep">
+                  <span className="h-3 w-3 animate-pulse rounded-full bg-coral" />
+                  recording
                 </span>
-                <span className="rounded-full bg-sky px-3 py-1 text-sm tabular-nums text-water-deep">{clock(session.elapsed)}</span>
+                <span className="rounded-full bg-sky px-3 py-1 text-sm tabular-nums text-water-deep">
+                  {clock(elapsed * 1000)} / {clock(MAX_SECONDS * 1000)}
+                </span>
               </div>
-              <p className="mt-2 text-xs text-water-deep">{STATUS_TEXT[session.status]}</p>
+              <div className="relative mt-2 h-4 overflow-hidden rounded-full border-[3px] border-water-deep bg-white">
+                <div
+                  className={`absolute inset-y-0 left-0 ${elapsed >= MIN_SECONDS ? "bg-leaf" : "bg-water-light"}`}
+                  style={{ width: `${Math.min(1, elapsed / MAX_SECONDS) * 100}%` }}
+                />
+                <div className="absolute inset-y-0 w-0.5 bg-water-deep" style={{ left: `${(MIN_SECONDS / MAX_SECONDS) * 100}%` }} />
+              </div>
+              <p className="mt-2 text-xs text-water-deep">
+                {elapsed < MIN_SECONDS
+                  ? `keep going: at least ${MIN_SECONDS} seconds.`
+                  : `you can stop now, or it stops on its own at ${MAX_SECONDS} seconds.`}{" "}
+                hold still and keep the room as it is.
+              </p>
               <div className="mt-4 flex gap-2">
-                <Button primary onClick={stopEarly}>
-                  stop
+                <Button primary onClick={() => void stopRecording()}>
+                  stop and analyze
                 </Button>
                 <Button onClick={cancel}>cancel</Button>
               </div>
@@ -821,6 +840,7 @@ function Fallback({
   estimate,
   onBoth,
   onTap,
+  onUpload,
   onUseEstimate,
 }: {
   from: Source;
@@ -830,10 +850,11 @@ function Fallback({
   estimate: number | null;
   onBoth: () => void;
   onTap: () => void;
+  onUpload: () => void;
   onUseEstimate: () => void;
 }) {
   const text = blocked
-    ? `${message}. allow the camera and microphone in your browser and try again, or tap along with the drops instead.`
+    ? `${message}. allow the camera and microphone in your browser and try again, upload a 10–30 second video, or tap along with the drops.`
     : from === "tap"
       ? `couldn't get a steady rhythm from your taps (${message}).`
       : `couldn't confirm the drops with camera and mic together (${message}). make sure you tapped where the drops fall, add light, and move the phone closer, or tap along with the drops.`;
@@ -857,6 +878,7 @@ function Fallback({
             <Button primary onClick={onBoth}>
               try again
             </Button>
+            <Button onClick={onUpload}>upload a video</Button>
             <Button onClick={onTap}>tap manually</Button>
           </>
         )}
