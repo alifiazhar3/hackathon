@@ -15,7 +15,7 @@ import {
   type Source,
   type Unit,
 } from "@/lib/drips";
-import { cameraSampler, COLUMN_HALF_WIDTH, combinedSampler, micSampler, openCamera, type SamplerStatus } from "@/lib/samplers";
+import { COLUMN_HALF_WIDTH, combinedSampler, openCamera, type SamplerStatus } from "@/lib/samplers";
 import { fuse, fuseStream, type Fused } from "@/lib/fusion";
 import { findRhythm } from "@/lib/rhythm";
 import { useDropSession } from "@/lib/useDropSession";
@@ -156,27 +156,6 @@ export default function App() {
     setMode(next);
   }
 
-  async function listen() {
-    reset("mic");
-    try {
-      session.start(await micSampler(), "mic");
-    } catch (e) {
-      setMode("idle");
-      setFailure({ source: "mic", message: `microphone unavailable: ${errorText(e)}` });
-    }
-  }
-
-  async function watch() {
-    reset("camera");
-    try {
-      closeCameraRef.current = await openCamera(videoRef.current!);
-      setAiming(true);
-    } catch (e) {
-      setMode("idle");
-      setFailure({ source: "camera", message: `camera unavailable: ${errorText(e)}` });
-    }
-  }
-
   /** camera and microphone together: open the camera first so the user can aim */
   async function watchAndListen() {
     reset("both");
@@ -185,7 +164,7 @@ export default function App() {
       setAiming(true);
     } catch (e) {
       setMode("idle");
-      setFailure({ source: "camera", message: `camera unavailable: ${errorText(e)}` });
+      setFailure({ source: "both", message: `camera unavailable: ${errorText(e)}` });
     }
   }
 
@@ -198,17 +177,13 @@ export default function App() {
     setAiming(false);
     const close = closeCameraRef.current ?? (() => {});
     closeCameraRef.current = null;
-    if (mode === "both") {
-      try {
-        session.start(await combinedSampler(videoRef.current, x, close), "both");
-      } catch (err) {
-        close();
-        setMode("idle");
-        setFailure({ source: "mic", message: `microphone unavailable: ${errorText(err)}` });
-      }
-      return;
+    try {
+      session.start(await combinedSampler(videoRef.current, x, close), "both");
+    } catch (err) {
+      close();
+      setMode("idle");
+      setFailure({ source: "both", message: `microphone unavailable: ${errorText(err)}` });
     }
-    session.start(cameraSampler(videoRef.current, x, close), "camera");
   }
 
   function finishCup() {
@@ -301,8 +276,6 @@ export default function App() {
                     onClick={watchAndListen}
                   />
                 </div>
-                <Choice picture={<MicPic />} label="mic only" hint="just listen" onClick={listen} />
-                <Choice picture={<CameraPic />} label="camera only" hint="just watch" onClick={watch} />
                 <Choice picture={<FingerPic />} label="tap manually" hint="tap along with each drop" onClick={startTapping} />
                 <Choice picture={<FilmPic />} label="test a recording" hint="check a video or audio file" onClick={() => reset("file")} />
               </div>
@@ -329,8 +302,6 @@ export default function App() {
               blocked={failure !== null}
               message={failure?.message ?? lowResult?.reason ?? ""}
               estimate={lowResult?.dropsPerMin ?? null}
-              onCamera={watch}
-              onListen={listen}
               onBoth={watchAndListen}
               onTap={startTapping}
               onUseEstimate={() => setUseEstimate(true)}
@@ -365,7 +336,7 @@ export default function App() {
                     full
                   </Button>
                 )}
-                <Button onClick={watch}>watch again</Button>
+                <Button onClick={watchAndListen}>watch again</Button>
                 <Button onClick={cancel}>cancel</Button>
               </div>
               {cupStartedAt !== null && <CupTimer startedAt={cupStartedAt} />}
@@ -848,32 +819,24 @@ function Fallback({
   blocked,
   message,
   estimate,
-  onCamera,
-  onListen,
   onBoth,
   onTap,
   onUseEstimate,
 }: {
   from: Source;
-  /** the device couldn't be opened at all, rather than giving an unclear reading */
+  /** a device couldn't be opened at all, rather than giving an unclear reading */
   blocked: boolean;
   message: string;
   estimate: number | null;
-  onCamera: () => void;
-  onListen: () => void;
   onBoth: () => void;
   onTap: () => void;
   onUseEstimate: () => void;
 }) {
   const text = blocked
-    ? `${message}. ${from === "mic" ? "the camera can watch the drops instead." : "you can tap along with the drops instead."}`
-    : from === "both"
-      ? `couldn't confirm the drops with camera and mic together (${message}).`
-      : from === "mic"
-      ? `couldn't count drops reliably from sound (${message}). the camera can watch the drops instead, and it can also spot a steady stream.`
-      : from === "camera"
-        ? `couldn't see drops clearly (${message}). make sure you tapped where the drops fall, add light, move closer, or tap along with the drops.`
-        : `couldn't get a steady rhythm from your taps (${message}).`;
+    ? `${message}. allow the camera and microphone in your browser and try again, or tap along with the drops instead.`
+    : from === "tap"
+      ? `couldn't get a steady rhythm from your taps (${message}).`
+      : `couldn't confirm the drops with camera and mic together (${message}). make sure you tapped where the drops fall, add light, and move the phone closer, or tap along with the drops.`;
 
   return (
     <div className="rounded-2xl border-[3px] border-sun bg-sun-light p-4">
@@ -882,39 +845,19 @@ function Fallback({
         <p className="text-sm">{text}</p>
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
-        {from === "mic" && (
-          <>
-            <Button primary onClick={onCamera}>
-              allow camera
-            </Button>
-            <Button onClick={onListen}>listen again</Button>
-            <Button onClick={onTap}>tap manually</Button>
-          </>
-        )}
-        {from === "camera" && (
-          <>
-            <Button primary onClick={onTap}>
-              tap manually
-            </Button>
-            <Button onClick={onCamera}>try camera again</Button>
-            <Button onClick={onListen}>listen again</Button>
-          </>
-        )}
-        {from === "both" && (
-          <>
-            <Button primary onClick={onBoth}>
-              try again
-            </Button>
-            <Button onClick={onCamera}>camera only</Button>
-            <Button onClick={onListen}>mic only</Button>
-          </>
-        )}
-        {from === "tap" && (
+        {from === "tap" ? (
           <>
             <Button primary onClick={onTap}>
               tap again
             </Button>
-            <Button onClick={onListen}>listen instead</Button>
+            <Button onClick={onBoth}>try camera + mic</Button>
+          </>
+        ) : (
+          <>
+            <Button primary onClick={onBoth}>
+              try again
+            </Button>
+            <Button onClick={onTap}>tap manually</Button>
           </>
         )}
       </div>
