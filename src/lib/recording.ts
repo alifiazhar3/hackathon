@@ -26,12 +26,25 @@ export type RecordingResult = {
   combined: { measurement: Fused | null; stream: ReturnType<typeof fuseStream> } | null;
 };
 
-/** drops heard in the recording's sound track, or null if it has none */
+/**
+ * phone videos can be hundreds of megabytes; reading one whole into memory to
+ * get its sound can stall or crash a phone's browser, so bigger files are
+ * judged on the picture alone
+ */
+const MAX_SOUND_FILE_BYTES = 120 * 1024 * 1024;
+/** some browsers never finish decoding the sound of certain videos */
+const SOUND_TIMEOUT_MS = 20_000;
+
+/** drops heard in the recording's sound track, or null if it has none (or it can't be read in time) */
 export async function analyzeSound(file: Blob): Promise<SoundResult | null> {
+  if (file.size > MAX_SOUND_FILE_BYTES) return null;
   let audio: AudioBuffer;
   try {
-    const data = await file.arrayBuffer();
-    audio = await new OfflineAudioContext(1, 48000, 48000).decodeAudioData(data);
+    const decode = file.arrayBuffer().then((data) => new OfflineAudioContext(1, 48000, 48000).decodeAudioData(data));
+    const timeout = new Promise<null>((resolve) => window.setTimeout(() => resolve(null), SOUND_TIMEOUT_MS));
+    const decoded = await Promise.race([decode, timeout]);
+    if (!decoded) return null;
+    audio = decoded;
   } catch {
     return null;
   }
@@ -67,12 +80,17 @@ export function analyzeSamples(mono: Float32Array, sampleRate: number): SoundRes
   };
 }
 
-const FPS = 30;
 const WIDTH = 320;
+/** reading the picture may take up to this many times the video's length... */
+const ANALYSIS_TIME_SHARE = 3;
+/** ...but always gets at least this long */
+const MIN_ANALYSIS_MS = 45_000;
 /** videos are played at most this much faster than real time while every frame is read */
 const MAX_PLAY_RATE = 2;
 /** ...and at least this fast, even on a slow device */
 const MIN_PLAY_RATE = 0.5;
+/** frames closer together than this are skipped */
+const MIN_FRAME_GAP_MS = 30;
 /** columns searched for the drip, besides the one tapped */
 const SEARCH_COLUMNS = Array.from({ length: 13 }, (_, i) => 0.08 + i * 0.07);
 
@@ -84,6 +102,7 @@ export class ColumnSearch {
   private watchers: { column: number; detector: VideoDropDetector; streamFrames: number }[];
   private frames = 0;
   private steady: Stabilizer;
+  private lastT = -Infinity;
 
   constructor(
     width: number,
@@ -96,6 +115,10 @@ export class ColumnSearch {
   }
 
   push(raw: Uint8Array, t: number) {
+    // the detectors are tuned for about 30 frames a second: a 60 fps phone video's
+    // extra frames only halve each change and double the work
+    if (t - this.lastT < MIN_FRAME_GAP_MS) return;
+    this.lastT = t;
     this.frames++;
     const gray = this.steady.push(raw);
     for (const w of this.watchers) {
@@ -238,23 +261,27 @@ type FrameVideo = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: (now: number, meta: { mediaTime: number }) => void) => number;
 };
 
+type OnFrame = (ctx: CanvasRenderingContext2D, t: number) => void;
+
 /**
  * plays the video (muted) and reads every frame as it is shown. much quicker
  * than seeking frame by frame, which makes the browser decode from the last
- * keyframe every time. the speed adapts to the device: as fast as it can
- * while still reading every frame.
+ * keyframe every time (minutes for a phone video). where the browser can say
+ * when each frame is shown, the speed adapts: as fast as it can while still
+ * reading every frame. elsewhere frames are read as the screen redraws.
  */
-async function playThrough(video: FrameVideo, seconds: number, onFrame: (ctx: CanvasRenderingContext2D, t: number) => void, ctx: CanvasRenderingContext2D, onProgress: (share: number) => void) {
-  if (!video.requestVideoFrameCallback) throw new Error("no frame callbacks");
+async function playThrough(video: FrameVideo, seconds: number, onFrame: OnFrame, ctx: CanvasRenderingContext2D, onProgress: (share: number) => void, deadline: number) {
   await seekTo(video, 0);
   video.muted = true;
   video.playbackRate = 1;
+  const exact = !!video.requestVideoFrameCallback;
   let frames = 0;
   // how far apart the video's frames are, and whether any were skipped lately
   let frameGap = Infinity;
   let lastMedia = -1;
   let skipped = 0;
   let clean = 0;
+  let outOfTime = false;
   await new Promise<void>((resolve, reject) => {
     let last = performance.now();
     let finished = false;
@@ -268,19 +295,25 @@ async function playThrough(video: FrameVideo, seconds: number, onFrame: (ctx: Ca
       else resolve();
     };
     const onEnded = () => finish();
-    // playback stalled (or the browser refused to play): fall back to seeking
     const watchdog = window.setInterval(() => {
+      // taking too long: stop and use what has been read
+      if (performance.now() > deadline) {
+        outOfTime = true;
+        return finish();
+      }
+      // playback stalled (or the browser refused to play): fall back to seeking
       if (performance.now() - last > 4000) finish(new Error("playback stalled"));
     }, 500);
-    const step = (_now: number, meta: { mediaTime: number }) => {
-      if (finished) return;
+    const handle = (mediaTime: number) => {
       last = performance.now();
-      if (meta.mediaTime > seconds) return finish();
-      onFrame(ctx, meta.mediaTime * 1000);
+      if (mediaTime > seconds) return finish();
+      onFrame(ctx, mediaTime * 1000);
       frames++;
-      const gap = lastMedia >= 0 ? (meta.mediaTime - lastMedia) * 1000 : NaN;
+      const gap = lastMedia >= 0 ? (mediaTime - lastMedia) * 1000 : NaN;
       if (gap > 0) frameGap = Math.min(frameGap, gap);
-      lastMedia = meta.mediaTime;
+      lastMedia = mediaTime;
+      onProgress(Math.min(1, mediaTime / seconds));
+      if (!exact) return;
       // every frame matters for small, fast drops: slow down as soon as frames are
       // skipped, and speed up only after a long run without any
       if (gap > frameGap * 1.5) {
@@ -294,26 +327,47 @@ async function playThrough(video: FrameVideo, seconds: number, onFrame: (ctx: Ca
         skipped = 0;
         video.playbackRate = Math.min(MAX_PLAY_RATE, video.playbackRate + 0.25);
       }
-      onProgress(Math.min(1, meta.mediaTime / seconds));
-      video.requestVideoFrameCallback!(step);
     };
+    if (exact) {
+      const step = (_now: number, meta: { mediaTime: number }) => {
+        if (finished) return;
+        handle(meta.mediaTime);
+        if (!finished) video.requestVideoFrameCallback!(step);
+      };
+      video.requestVideoFrameCallback!(step);
+    } else {
+      // no frame callbacks: look at the video every time the screen redraws
+      let seen = -1;
+      const tick = () => {
+        if (finished) return;
+        const t = video.currentTime;
+        if (t !== seen && !video.paused) {
+          seen = t;
+          handle(t);
+        }
+        if (!finished) window.requestAnimationFrame(tick);
+      };
+      window.requestAnimationFrame(tick);
+    }
     video.addEventListener("ended", onEnded);
-    video.requestVideoFrameCallback!(step);
     video.play().catch((e) => finish(e instanceof Error ? e : new Error(String(e))));
   });
   video.playbackRate = 1;
   // too few frames came through to trust (a very slow device): seek instead
-  if (frames < seconds * 8) throw new Error("too few frames");
+  if (!outOfTime && frames < seconds * 8) throw new Error("too few frames");
 }
 
-/** steps through the video one frame at a time (slower, but works everywhere) */
-async function seekThrough(video: HTMLVideoElement, seconds: number, onFrame: (ctx: CanvasRenderingContext2D, t: number) => void, ctx: CanvasRenderingContext2D, onProgress: (share: number) => void) {
+/** frames a second read when seeking, the slow way that works everywhere */
+const SEEK_FPS = 15;
+
+/** steps through the video a frame at a time (slow, but works everywhere), until the deadline */
+async function seekThrough(video: HTMLVideoElement, seconds: number, onFrame: OnFrame, ctx: CanvasRenderingContext2D, onProgress: (share: number) => void, deadline: number) {
   video.pause();
-  const frames = Math.floor(seconds * FPS);
-  for (let i = 0; i < frames; i++) {
-    await seekTo(video, (i + 0.5) / FPS);
-    onFrame(ctx, (i * 1000) / FPS);
-    if (i % 10 === 0) onProgress(i / frames);
+  const frames = Math.floor(seconds * SEEK_FPS);
+  for (let i = 0; i < frames && performance.now() < deadline; i++) {
+    await seekTo(video, (i + 0.5) / SEEK_FPS);
+    onFrame(ctx, ((i + 0.5) * 1000) / SEEK_FPS);
+    if (i % 5 === 0) onProgress(i / frames);
   }
 }
 
@@ -336,13 +390,15 @@ export async function analyzePicture(
   canvas.height = H;
   const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
 
+  // a phone may be slow: never take more than this, and use what was read by then
+  const deadline = performance.now() + Math.max(MIN_ANALYSIS_MS, seconds * 1000 * ANALYSIS_TIME_SHARE);
   let search = new ColumnSearch(WIDTH, H, tapColumn);
   const onFrame = (c: CanvasRenderingContext2D, t: number) => search.push(grayFrame(c, video, WIDTH, H), t);
   try {
-    await playThrough(video, seconds, onFrame, ctx, onProgress);
+    await playThrough(video, seconds, onFrame, ctx, onProgress, deadline);
   } catch {
     search = new ColumnSearch(WIDTH, H, tapColumn);
-    await seekThrough(video, seconds, onFrame, ctx, onProgress);
+    await seekThrough(video, seconds, onFrame, ctx, onProgress, deadline);
   }
   onProgress(1);
   void seekTo(video, 0);
