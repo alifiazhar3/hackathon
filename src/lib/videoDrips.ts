@@ -62,12 +62,18 @@ const SUDDEN_MAX_GLOBAL = 0.02;
 const SUDDEN_MAX_WIDTH = 0.45;
 /** changes this close together are the same drop (forming, falling, splashing) */
 const SAME_DROP_MS = 250;
+/** the column has calmed down when it changes less than this share of what counts as a drop */
+const CALM_SHARE = 0.5;
+/** ...for this many frames in a row */
+const CALM_FRAMES = 3;
 const USUAL_WINDOW = 60;
 
 /** a stream must cover this share of the frame height in one unbroken run */
 const STREAM_MIN_LENGTH = 0.15;
 /** ...stay this close to a straight vertical line (px) */
 const STREAM_MAX_WOBBLE = 8;
+/** a wide stream's band reaches out to where activity falls below this share of the line's */
+const STREAM_WIDTH_SHARE = 0.3;
 /** ...and show up in this share of recent frames */
 const STREAM_MIN_SHARE = 0.5;
 /** a shimmering stream has gaps in any one frame, so combine this many */
@@ -77,11 +83,24 @@ const STREAM_THRESHOLD_SHARE = 0.4;
 /** rows along a stream's line must be at least this full... */
 const STREAM_MIN_DENSITY = 0.6;
 /** a row must be on the line in at least this share of the last STREAM_PERSIST_FRAMES frames */
-const STREAM_MIN_PERSIST = 0.5;
+const STREAM_MIN_PERSIST = 0.8;
 const STREAM_PERSIST_FRAMES = 10;
 /** ...and this much fuller than grain alone would make them */
 const STREAM_OVER_GRAIN_DENSITY = 0.35;
 const STREAM_WINDOW = 30;
+
+/**
+ * whether a frame is a copy of the one before. a real camera frame always
+ * differs somewhere by more than a few levels (grain, or a drop); a copy, even
+ * re-compressed, doesn't.
+ */
+export function isRepeat(a: Uint8Array, b: Uint8Array) {
+  let differ = 0;
+  for (let i = 0; i < a.length; i += 2) {
+    if (Math.abs(a[i] - b[i]) > 6 && ++differ > 2) return false;
+  }
+  return true;
+}
 
 type Blob = { x: number; y: number; area: number };
 type Point = { t: number; x: number; y: number };
@@ -111,6 +130,8 @@ export class VideoDropDetector {
   /** changed pixels in the column on the latest frame (for display) */
   level = 0;
   status: CameraStatus = "calibrating";
+  /** how much the column (and the whole picture) changed on each frame, for finding a rhythm */
+  readonly activity = { t: [] as number[], column: [] as number[], global: [] as number[] };
 
   constructor(
     private width: number,
@@ -125,6 +146,10 @@ export class VideoDropDetector {
 
   /** feed one grayscale frame (width × height, row by row) taken at time t (ms) */
   push(gray: Uint8Array, t: number) {
+    // slow-motion and frame-rate-converted videos repeat frames; a repeat shows
+    // nothing new, and would make every real change look sudden
+    const last = this.frames[this.frames.length - 1];
+    if (last && isRepeat(last.gray, gray)) return;
     if (this.startedAt === null) this.startedAt = t;
     this.frames.push({ gray, t, mean: this.columnMean(gray) });
     if (this.frames.length > 3) this.frames.shift();
@@ -158,7 +183,13 @@ export class VideoDropDetector {
       const cf = this.calibrationFrames;
       const counts = cf.slice(1).map((b, i) => this.countChange(cf[i], b));
       this.usual = counts.slice(-USUAL_WINDOW).map((c) => c.changed);
-      counts.forEach((c, i) => this.judgeChange(c, this.globalChange(cf[i], cf[i + 1]), cf[i + 1].t));
+      counts.forEach((c, i) => {
+        const g = this.globalChange(cf[i], cf[i + 1]);
+        this.activity.t.push(cf[i + 1].t);
+        this.activity.column.push(c.changed);
+        this.activity.global.push(g);
+        this.judgeChange(c, g, cf[i + 1].t);
+      });
       this.calibrationFrames = [];
     }
     this.checkSuddenChange(f1, f2, global);
@@ -197,14 +228,25 @@ export class VideoDropDetector {
         line = x;
       }
     }
-    const lo = Math.max(0, line - STREAM_MAX_WOBBLE);
-    const hi = Math.min(w - 1, line + STREAM_MAX_WOBBLE);
+    // the band covers the line's sway, or the whole width of a wide stream
+    const smooth = (x: number) => {
+      let sum = 0;
+      for (let d = -2; d <= 2; d++) sum += perX[x + d] ?? 0;
+      return sum / 5;
+    };
+    const peak = smooth(line);
+    let lo = line;
+    let hi = line;
+    while (lo > 0 && smooth(lo - 1) >= peak * STREAM_WIDTH_SHARE) lo--;
+    while (hi < w - 1 && smooth(hi + 1) >= peak * STREAM_WIDTH_SHARE) hi++;
+    lo = Math.max(0, Math.min(lo, line - STREAM_MAX_WOBBLE));
+    hi = Math.min(w - 1, Math.max(hi, line + STREAM_MAX_WOBBLE));
     const band = hi - lo + 1;
 
-    // how often grain alone would put a pixel in the band, from activity outside it
-    let outside = 0;
-    for (let x = 0; x < w; x++) if (x < lo || x > hi) outside += perX[x];
-    const grainPerPixel = outside / Math.max(1, h * (w - band));
+    // how often grain alone would put a pixel in the band, from the quietest
+    // quarter of the column (a wide stream can fill the rest)
+    const quietest = [...perX].sort((a, b) => a - b)[Math.floor(w * 0.25)];
+    const grainPerPixel = quietest / h;
     const grainChance = 1 - (1 - grainPerPixel) ** band;
 
     // a stream's line is busy frame after frame; a falling drop crosses each
@@ -416,14 +458,30 @@ export class VideoDropDetector {
     const usual = sorted.length ? sorted[Math.floor(sorted.length * 0.3)] : changed;
     const area = (this.height - 1) * (this.x1 - this.x0 - 1);
     const narrow = width <= (this.x1 - this.x0) * SUDDEN_MAX_WIDTH;
-    const big = changed >= this.height * SUDDEN_MIN_PIXELS_PER_ROW && changed >= usual * SUDDEN_OVER_USUAL;
-    if (!this.stream && narrow && big && global <= SUDDEN_MAX_GLOBAL && changed <= area * SUDDEN_MAX_SHARE) {
+    const minimum = this.height * SUDDEN_MIN_PIXELS_PER_ROW;
+    const big = changed >= minimum && changed >= usual * SUDDEN_OVER_USUAL;
+    if (this.armed && !this.stream && narrow && big && global <= SUDDEN_MAX_GLOBAL && changed <= area * SUDDEN_MAX_SHARE) {
       this.addOnset(t);
+      this.armed = false;
+    }
+    // one drop can keep the column busy for many frames (slow motion, a long
+    // splash); the next drop only counts once the column has calmed down
+    if (changed < Math.max(minimum, usual * SUDDEN_OVER_USUAL) * CALM_SHARE) {
+      if (++this.calmFrames >= CALM_FRAMES) this.armed = true;
+    } else {
+      this.calmFrames = 0;
     }
   }
 
+  /** whether the column has calmed down since the last drop */
+  private armed = true;
+  private calmFrames = 0;
+
   private checkSuddenChange(a: { gray: Uint8Array; mean: number }, b: { gray: Uint8Array; mean: number; t: number }, global: number) {
     const change = this.countChange(a, b);
+    this.activity.t.push(b.t);
+    this.activity.column.push(change.changed);
+    this.activity.global.push(global);
     this.judgeChange(change, global, b.t);
     this.usual.push(change.changed);
     if (this.usual.length > USUAL_WINDOW) this.usual.shift();
@@ -486,5 +544,85 @@ export class VideoDropDetector {
     if (speedPer100ms < this.height * MIN_FALL_SPEED) return;
     tr.counted = true;
     this.addOnset(first.t);
+  }
+}
+
+/** the camera may drift this far (px) from where it started before the picture is re-anchored */
+const STEADY_MAX_DRIFT = 40;
+/** largest shift (px) looked for between two frames */
+const STEADY_SEARCH = 6;
+
+/**
+ * keeps the picture still when the camera moves a little (a hand-held phone,
+ * a swaying close-up): each frame's shift from the one before is found by
+ * matching them, and the frame is moved back by the total shift. the column
+ * the user tapped then stays on the drip, and the drips aren't mistaken for
+ * the whole picture moving.
+ */
+export class Stabilizer {
+  private previous: Uint8Array | null = null;
+  private dx = 0;
+  private dy = 0;
+
+  constructor(
+    private width: number,
+    private height: number,
+  ) {}
+
+  /** the frame, moved so the scene stays where it was in the first frame */
+  push(gray: Uint8Array): Uint8Array {
+    const prev = this.previous;
+    this.previous = gray;
+    if (prev) {
+      const [sx, sy] = this.shiftBetween(prev, gray);
+      this.dx += sx;
+      this.dy += sy;
+      // panned too far to keep up: start again from here
+      if (Math.abs(this.dx) > STEADY_MAX_DRIFT || Math.abs(this.dy) > STEADY_MAX_DRIFT) {
+        this.dx = 0;
+        this.dy = 0;
+      }
+    }
+    if (!this.dx && !this.dy) return gray;
+    return this.moved(gray, this.dx, this.dy);
+  }
+
+  /** how far the scene moved from a to b, if clearly at all */
+  private shiftBetween(a: Uint8Array, b: Uint8Array): [number, number] {
+    const { width: w, height: h } = this;
+    const r = STEADY_SEARCH;
+    const cost = (sx: number, sy: number) => {
+      let sum = 0;
+      for (let y = r; y < h - r; y += 4) {
+        for (let x = r; x < w - r; x += 4) sum += Math.abs(b[(y + sy) * w + x + sx] - a[y * w + x]);
+      }
+      return sum;
+    };
+    const still = cost(0, 0);
+    let best: [number, number] = [0, 0];
+    let bestCost = still;
+    for (let sy = -r; sy <= r; sy++) {
+      for (let sx = -r; sx <= r; sx++) {
+        if (!sx && !sy) continue;
+        const c = cost(sx, sy);
+        if (c < bestCost) {
+          bestCost = c;
+          best = [sx, sy];
+        }
+      }
+    }
+    // only a clear improvement counts as movement, so grain can't jiggle a still picture
+    return bestCost < still * 0.85 ? best : [0, 0];
+  }
+
+  /** b shifted back by (dx, dy), edges filled from the nearest pixel */
+  private moved(gray: Uint8Array, dx: number, dy: number) {
+    const { width: w, height: h } = this;
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const sy = Math.min(h - 1, Math.max(0, y + dy));
+      for (let x = 0; x < w; x++) out[y * w + x] = gray[sy * w + Math.min(w - 1, Math.max(0, x + dx))];
+    }
+    return out;
   }
 }

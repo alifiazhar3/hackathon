@@ -5,16 +5,24 @@
  * lands, so the two sensors' events line up at a steady gap (plus a little
  * device delay). that gap is learned from the events themselves. a drop seen
  * and heard at that gap is confirmed; a drop caught by only one sensor still
- * counts if it lands on the confirmed rhythm. the two sensors' own drip rates
- * are also compared, so a mismatch (camera on the wrong tap, sound from
- * elsewhere) is reported instead of guessed through.
+ * counts if it lands on the confirmed rhythm.
+ *
+ * many videos aren't like that: the sound is out of sync, dubbed from another
+ * take, or missing. so the two sensors' own drip rates matter most. if they
+ * agree, their average is used; if only one found a drip, it is used; if they
+ * disagree, the surer one wins (the picture, on a tie, since it shows the leak).
+ * a leak found by either sensor is never thrown away.
  */
 import { analyze, type Measurement } from "@/lib/drips";
 import { findRhythm, tolerance } from "@/lib/rhythm";
 
-/** the sound may come this long after (or, with device delay, slightly before) the sight */
-const LAG_MIN_MS = -300;
-const LAG_MAX_MS = 800;
+/**
+ * the sound may come this long after (or before) the sight: a drop is heard a
+ * moment after it is seen, and many videos' sound is a little out of sync.
+ * a drip repeats, so even a sound track shifted by several drops still lines up.
+ */
+const LAG_MIN_MS = -4000;
+const LAG_MAX_MS = 4000;
 const LAG_BIN_MS = 10;
 /** a sound and a sighting this close to the learned gap are the same drop (two video frames) */
 const PAIR_TOLERANCE_MS = 60;
@@ -40,8 +48,16 @@ export type Fused = Measurement & {
     picture: Measurement;
     /** "agree", "disagree", or which single sensor found a rhythm */
     rates: "agree" | "disagree" | "sound only" | "picture only" | "neither";
+    /** which sensor the answer came from when they didn't agree */
+    chose?: "sound" | "picture";
   };
 };
+
+/**
+ * each sensor's own result, when it was worked out by more than its event
+ * times, and which sensor had nothing to offer at all (a video without sound)
+ */
+export type Given = { sound?: Measurement; picture?: Measurement; noSound?: boolean; noPicture?: boolean };
 
 /** the most common gap from a sighting to a sound, if there is a clear one */
 export function learnLag(seen: number[], heard: number[]): number | null {
@@ -99,9 +115,9 @@ function average(ms: Measurement[]) {
 }
 
 /** seen and heard event times (ms, same clock) over a measurement lasting durationMs */
-export function fuse(seen: number[], heard: number[], durationMs: number): Fused {
-  const sound = analyze("mic", heard, durationMs);
-  const picture = analyze("camera", seen, durationMs);
+export function fuse(seen: number[], heard: number[], durationMs: number, given: Given = {}): Fused {
+  const sound = given.sound ?? analyze("mic", heard, durationMs);
+  const picture = given.picture ?? analyze("camera", seen, durationMs);
   const soundRate = rateOf(sound);
   const pictureRate = rateOf(picture);
   const rates: Fused["fused"]["rates"] =
@@ -127,39 +143,23 @@ export function fuse(seen: number[], heard: number[], durationMs: number): Fused
       dropsPerMin: rate,
       intervalMs: 60000 / rate,
       drops: Math.max(sound.drops, picture.drops),
-      confidence: "medium",
+      confidence: sound.confidence === "high" && picture.confidence === "high" ? "high" : "medium",
+      rough: sound.rough && picture.rough,
       reason: null,
       fused: { ...base, confirmed: 0, heardOnly: 0, seenOnly: 0 },
     };
   }
 
   if (lagMs === null) {
-    // the sensors never lined up: fall back to whichever one found a rhythm, honestly labelled
-    // with nothing lining up, one sensor alone must be sure of a clear drip; a weak
-    // single-sensor rhythm is more often noise than a drip the other sensor missed
-    const candidate = rates === "sound only" ? sound : rates === "picture only" ? picture : null;
-    const own = candidate ? findRhythm(rates === "sound only" ? heard : seen, FLOOR_MS) : null;
-    const unmistakable = !!own && own.fitShare >= 0.75 && own.beatsPerGap <= 1.3;
-    const single = candidate && candidate.confidence === "high" && candidate.drops >= 6 && unmistakable ? candidate : null;
-    if (single) {
-      return {
-        ...single,
-        source: "both",
-        confidence: single.confidence === "high" ? "medium" : single.confidence,
-        reason: null,
-        fused: { ...base, confirmed: 0, heardOnly: rates === "sound only" ? single.drops : 0, seenOnly: rates === "picture only" ? single.drops : 0 },
-      };
-    }
+    // the drops never lined up one for one (out of sync, another take, or one sensor
+    // found nothing): go with whichever sensor found a drip
+    const pick = surer(sound, picture);
+    if (pick) return single(pick, pick === sound ? "sound" : "picture", { ...base, confirmed: 0, heardOnly: 0, seenOnly: 0 }, durationMs, pick === sound ? heard : seen, pick === sound ? seen : heard, given);
     return {
       ...analyze("both", [], durationMs),
       events: seen.length + heard.length,
       confidence: "low",
-      reason:
-        rates === "disagree"
-          ? "the sound and the picture don't match: make sure the camera is on the tap you can hear"
-          : seen.length + heard.length
-            ? "the sounds and movements never lined up as drops"
-            : "no drops seen or heard",
+      reason: seen.length + heard.length ? "no steady drip was seen or heard" : "no drops seen or heard",
       fused: { ...base, confirmed: 0, heardOnly: 0, seenOnly: 0 },
     };
   }
@@ -248,7 +248,8 @@ export function fuse(seen: number[], heard: number[], durationMs: number): Fused
       drops = confirmed.length + heardOnly + seenOnly;
       confidence = "medium";
     } else {
-      reason = "the sound and the picture keep different rhythms: make sure the camera is on the tap you can hear";
+      const pick = surer(sound, picture)!;
+      return single(pick, pick === sound ? "sound" : "picture", fusedInfo, durationMs, pick === sound ? heard : seen, pick === sound ? seen : heard, given);
     }
   } else if (usable.length === 1) {
     const only = usable[0];
@@ -262,15 +263,8 @@ export function fuse(seen: number[], heard: number[], durationMs: number): Fused
       drops = confirmed.length + heardOnly + seenOnly;
       confidence = "medium";
     } else {
-      // too few shared drops to check against: one sensor alone must be unmistakable
-      const own = findRhythm(only === sound ? heard : seen, FLOOR_MS);
-      if (only.confidence === "high" && only.drops >= 6 && own.fitShare >= 0.75 && own.beatsPerGap <= 1.3) {
-        rate = only.dropsPerMin!;
-        drops = only.drops;
-        confidence = "medium";
-      } else {
-        reason = "only one of the sound and the picture found a steady drip, and the other didn't back it up";
-      }
+      // too few shared drops to check against: the one sensor that found a drip decides
+      return single(only, only === sound ? "sound" : "picture", fusedInfo, durationMs, only === sound ? heard : seen, only === sound ? seen : heard, given);
     }
   } else if (anchorRate !== null) {
     rate = anchorRate;
@@ -295,9 +289,96 @@ export function fuse(seen: number[], heard: number[], durationMs: number): Fused
   };
 }
 
-/** a stream judged by both sensors */
-export function fuseStream(pictureStream: boolean, soundSteady: boolean) {
+const RANK = { high: 2, medium: 1, low: 0 } as const;
+
+/** the sensor that found the clearer drip (the picture on a tie), or null if neither did */
+function surer(sound: Measurement, picture: Measurement) {
+  const s = rateOf(sound) !== null ? RANK[sound.confidence] : -1;
+  const p = rateOf(picture) !== null ? RANK[picture.confidence] : -1;
+  if (s < 0 && p < 0) return null;
+  return p >= s ? picture : sound;
+}
+
+/**
+ * one sensor's drip, as the combined answer. if the other sensor had nothing
+ * to offer (a video without sound), it stands as it is. if the other sensor
+ * was working but didn't find the same drip, it must be unmistakable on its
+ * own, since a weak rhythm in one sensor is more often chance than a drip.
+ */
+function single(
+  m: Measurement,
+  which: "sound" | "picture",
+  info: Fused["fused"],
+  durationMs: number,
+  events: number[],
+  otherEvents: number[],
+  given: Given,
+): Fused {
+  const other = which === "sound" ? info.picture : info.sound;
+  const otherMissing = which === "sound" ? given.noPicture : given.noSound;
+  const contradicted = rateOf(other) !== null;
+  // the camera searches the whole picture, so seeing no drip anywhere counts against
+  // one; a drip can land silently, so the mic only counts against it if it heard
+  // other things instead
+  const unconfirmed =
+    !otherMissing && !contradicted && (which === "sound" || other.events >= 3) && !keepsTime(otherEvents, m.intervalMs!);
+  if ((contradicted || unconfirmed) && !unmistakable(m, events)) {
+    return {
+      ...analyze("both", [], durationMs),
+      events: info.sound.events + info.picture.events,
+      confidence: "low",
+      reason: contradicted
+        ? "the sound and the picture found different drips, and neither is clear enough to trust: make sure the camera is on the tap you can hear"
+        : `only the ${which} found a drip, and not clearly enough to be sure`,
+      fused: { ...info, chose: which },
+    };
+  }
+  return {
+    ...m,
+    // named after the sensor that found it when the other had nothing at all
+    source: otherMissing ? (which === "sound" ? "mic" : "camera") : "both",
+    durationMs,
+    // the other sensor could have backed it up and didn't: less sure
+    confidence: !otherMissing && m.confidence === "high" ? "medium" : m.confidence,
+    reason: null,
+    fused: { ...info, chose: which },
+  };
+}
+
+/**
+ * whether events keep time with a drip interval, even if they never line up
+ * with the other sensor's (sound out of sync, or another take): most gaps
+ * between them are a whole number of drips long
+ */
+export function keepsTime(events: number[], intervalMs: number) {
+  const times = [...events].sort((a, b) => a - b);
+  let fit = 0;
+  for (let i = 1; i < times.length; i++) {
+    const gap = times[i] - times[i - 1];
+    const k = Math.round(gap / intervalMs);
+    if (k >= 1 && k <= 3 && Math.abs(gap - k * intervalMs) <= 0.2 * intervalMs) fit++;
+  }
+  return fit >= 4 && fit >= (times.length - 1) * KEEPS_TIME_SHARE;
+}
+/** share of gaps that must fit (randomly timed events fit about a third) */
+const KEEPS_TIME_SHARE = 0.6;
+
+/** a drip so clear on one sensor that it needs no backing from the other */
+function unmistakable(m: Measurement, events: number[]) {
+  if (m.confidence !== "high") return false;
+  if (m.byRhythm) return true;
+  const own = findRhythm(events, FLOOR_MS);
+  return m.drops >= 6 && own.fitShare >= 0.75 && own.beatsPerGap <= 1.3;
+}
+
+/**
+ * a stream judged by both sensors. a fast drip can look like a stream on
+ * camera; if the sound clearly ticks to a drip rhythm, it is a drip.
+ */
+export function fuseStream(pictureStream: boolean, soundSteady: boolean, noSound = false, soundDrip = false) {
+  if (pictureStream && soundDrip) return { stream: false, sure: false, note: "it looks like a stream, but it sounds like a fast drip" };
   if (pictureStream && soundSteady) return { stream: true, sure: true, note: "seen and heard as a steady stream" };
+  if (pictureStream && noSound) return { stream: true, sure: true, note: "seen as a steady stream" };
   if (pictureStream) return { stream: true, sure: false, note: "it looks like a stream, but it doesn't sound like one" };
   return { stream: false, sure: !soundSteady, note: soundSteady ? "a steady rushing sound, but the camera sees drops or nothing" : "" };
 }

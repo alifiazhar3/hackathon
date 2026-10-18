@@ -270,7 +270,7 @@ export default function App() {
                   />
                 </div>
                 <Choice picture={<FingerPic />} label="tap manually" hint="tap along with each drop" onClick={startTapping} />
-                <Choice picture={<FilmPic />} label="upload a video" hint={`a ${MIN_SECONDS}–${MAX_SECONDS} s clip with sound`} onClick={() => reset("file")} />
+                <Choice picture={<FilmPic />} label="upload a video" hint={`a ${MIN_SECONDS}–${MAX_SECONDS} s clip of the leak`} onClick={() => reset("file")} />
               </div>
             </>
           )}
@@ -477,8 +477,12 @@ export default function App() {
                   </div>
                   <p className="mt-2 text-xs text-water-deep">
                     one drop every {((measured.intervalMs ?? 0) / 1000).toFixed(1)} s · {measured.confidence} confidence ·{" "}
-                    {measured.drops} drops in a steady rhythm over {Math.round(measured.durationMs / 1000)} s from{" "}
-                    {SOURCE_LABEL[measured.source]}
+                    {measured.rough
+                      ? `a slow drip: only ${measured.drops} drops fell in ${Math.round(measured.durationMs / 1000)} s, so this is a rough estimate`
+                      : measured.byRhythm
+                        ? `measured from the steady rhythm of the drops over ${Math.round(measured.durationMs / 1000)} s`
+                        : `${measured.drops} drops in a steady rhythm over ${Math.round(measured.durationMs / 1000)} s`}{" "}
+                    from {SOURCE_LABEL[measured.source]}
                     {measured.source !== "both" && measured.events > measured.drops
                       ? ` (${measured.events - measured.drops} other ${measured.source === "mic" ? "sounds" : "movements"} ignored)`
                       : ""}
@@ -659,9 +663,10 @@ function FusedSummary({ m }: { m: Fused }) {
         </>
       )}
       <p className="col-span-3 text-left text-water-deep">
-        sound alone: {fmt(f.sound)} · picture alone: {fmt(f.picture)}
+        sound alone: {f.sound.events || f.sound.dropsPerMin !== null ? fmt(f.sound) : "no sound"} · picture alone: {fmt(f.picture)}
         {f.rates === "agree" ? " · they agree, so drippy uses their average" : ""}
-        {f.lagMs !== null ? ` · each drop is heard ${Math.round(f.lagMs)} ms after it's seen` : ""}
+        {f.rates === "disagree" && f.chose ? ` · they found different drips, so drippy went with the clearer one (the ${f.chose})` : ""}
+        {f.rates !== "agree" && f.rates !== "disagree" && f.chose ? ` · the ${f.chose} found the drip` : ""}
       </p>
     </div>
   );
