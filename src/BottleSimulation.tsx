@@ -23,7 +23,10 @@ function waterY(fill: number) {
 function hasWebGL() {
   try {
     const canvas = document.createElement("canvas");
-    return !!(canvas.getContext("webgl2") || canvas.getContext("webgl"));
+    const gl = canvas.getContext("webgl2") || canvas.getContext("webgl");
+    // phones allow only a few 3d contexts at once: give the test one back straight away
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+    return !!gl;
   } catch {
     return false;
   }

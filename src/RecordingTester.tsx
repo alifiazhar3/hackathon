@@ -87,14 +87,16 @@ export function RecordingTester({
     setPhase("checking");
     setProgress(0);
     try {
-      setStep("listening to the sound…");
-      const sound = await analyzeSound(file);
+      // sound and picture are read at the same time, so a slow sound track doesn't hold up the picture
+      const listening = analyzeSound(file);
       const v = videoRef.current;
       let picture: RecordingResult["picture"] = null;
       if (v && v.videoWidth) {
         setStep("watching the video for drops…");
         picture = await analyzePicture(v, col, setProgress, length);
       }
+      setStep("listening to the sound…");
+      const sound = await listening;
       const combined = combine(sound, picture, length * 1000);
       setResult({ sound, picture, combined });
       if (picture) setColumn(picture.column);
@@ -140,6 +142,14 @@ export function RecordingTester({
     const rect = e.currentTarget.getBoundingClientRect();
     const x = Math.min(0.95, Math.max(0.05, (e.clientX - rect.left) / rect.width));
     setColumn(x);
+    // start playing right away, inside the tap: phones (iphones in low power mode
+    // especially) only let a video play when a tap starts it
+    const v = videoRef.current;
+    if (v) {
+      v.muted = true;
+      // the frame reader takes it from here (back to the start, then plays on)
+      void v.play()?.catch(() => {});
+    }
     void check(x, seconds);
   }
 
