@@ -6,17 +6,22 @@ import { gauss, rng } from "./synth";
 /**
  * monte carlo check of the rhythm rules on realistic, imperfect drips:
  * timing that wobbles 3–20% from drop to drop, a rate that drifts over the
- * clip, missed drops and stray events on both sensors, in 10–30 s clips
+ * clip, missed drops and stray events on both sensors, in 10–30 s clips.
+ * real videos often have sound that is out of sync, dubbed from another take,
+ * or missing, so those are simulated too.
  */
 
 type Clip = { truthRate: number | null; drops: number; heard: number[]; seen: number[]; durationMs: number };
+/** how the sound relates to the picture */
+type SoundKind = "synced" | "out of sync" | "another take" | "no sound";
 
-function makeClip(r: () => number, withDrips: boolean): Clip {
+function makeClip(r: () => number, withDrips: boolean, kind: SoundKind = "synced"): Clip {
   const durationSec = 10 + r() * 20;
   const interval = Math.exp(Math.log(0.3) + r() * (Math.log(4) - Math.log(0.3)));
   const jitter = 0.03 + r() * 0.17;
   const drift = r() * 0.15;
-  const lag = 120 + r() * 100;
+  // synced: heard as the drop lands; out of sync: the sound track is shifted by up to 3 s
+  const lag = kind === "out of sync" ? (r() < 0.5 ? -1 : 1) * (300 + r() * 2700) : 120 + r() * 100;
 
   const truth: number[] = [];
   if (withDrips) {
@@ -39,7 +44,15 @@ function makeClip(r: () => number, withDrips: boolean): Clip {
     return out.sort((a, b) => a - b);
   };
 
-  const heard = sensor(r() * 0.3, withDrips ? r() * 0.8 : 0.2 + r() * 1.3, 3, lag);
+  let heard = sensor(r() * 0.3, withDrips ? r() * 0.8 : 0.2 + r() * 1.3, 3, lag);
+  if (kind === "no sound") heard = [];
+  if (kind === "another take" && withDrips) {
+    // the same tap recorded separately: a few % faster or slower, its own wobble, no shared timing
+    const rate = interval * (1 + (r() - 0.5) * 0.08);
+    const take: number[] = [];
+    for (let t = r() * rate; t < durationSec - 0.2; t += Math.max(0.05, rate * (1 + gauss(r) * jitter))) if (r() > 0.15) take.push(t * 1000);
+    heard = take;
+  }
   const seen = sensor(r() * 0.3, withDrips ? r() * 0.3 : r() * 0.5, 17, 0);
   const truthRate = truth.length > 1 ? (60000 * (truth.length - 1)) / (truth[truth.length - 1] - truth[0]) : null;
   return { truthRate, drops: truth.length, heard, seen, durationMs: durationSec * 1000 };
@@ -81,6 +94,18 @@ describe("rhythm rules on realistic drips (simulation)", () => {
     "picture alone": score((c) => analyze("camera", c.seen, c.durationMs)),
     "camera + mic": score((c) => fuse(c.seen, c.heard, c.durationMs)),
   };
+  // the same drips with the sound out of sync, from another take, or missing
+  const variants = (["out of sync", "another take", "no sound"] as const).map((kind) => {
+    const rv = rng(kind.length * 7919);
+    const vDrips = Array.from({ length: N }, () => makeClip(rv, true, kind)).filter((c) => c.drops >= 4);
+    const vNoise = Array.from({ length: N }, () => makeClip(rv, false, kind));
+    const fused = (c: Clip) => fuse(c.seen, c.heard, c.durationMs, kind === "no sound" ? { noSound: true } : {});
+    const ok = vDrips.filter((c) => accurate(fused(c), c.truthRate!)).length / vDrips.length;
+    const unsure = vDrips.filter((c) => !usable(fused(c))).length / vDrips.length;
+    const falseAlarms = vNoise.filter((c) => usable(fused(c))).length / vNoise.length;
+    report.push(`camera + mic, ${kind.padEnd(13)} right rate (±10%) ${pct(ok)} · unsure ${pct(unsure)} · false alarms with no drip ${pct(falseAlarms)}`);
+    return { kind, ok, unsure, falseAlarms };
+  });
   for (const [name, s] of Object.entries(results)) {
     report.push(
       `${name.padEnd(14)} right rate (±10%) ${pct(s.ok)} · unsure ${pct(s.unsure)} · off by 10–25% ${pct(s.wrong - s.bad)} · badly wrong (>25%) ${pct(s.bad)} · false alarms with no drip ${pct(s.falseAlarms)}   (${drips.length} drip clips, ${noise.length} no-drip clips)`,
@@ -100,4 +125,10 @@ describe("rhythm rules on realistic drips (simulation)", () => {
   it("camera + mic reports a drip that isn't there under 5% of the time", () => {
     expect(results["camera + mic"].falseAlarms).toBeLessThan(0.05);
   });
+  for (const v of variants) {
+    it(`sound ${v.kind}: still right on at least 75% of clips, with under 8% false alarms`, () => {
+      expect(v.ok).toBeGreaterThanOrEqual(0.75);
+      expect(v.falseAlarms).toBeLessThan(0.08);
+    });
+  }
 });

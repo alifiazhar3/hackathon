@@ -139,11 +139,21 @@ describe("camera + mic together", () => {
     expect(Math.abs(out.fused.dropsPerMin! - out.trueRate!) / out.trueRate!).toBeLessThan(0.03);
   });
 
-  it("sound from a different drip than the one on camera: reports the mismatch", () => {
+  it("sound from a different drip than the one on camera: goes with the picture, less sure", () => {
     const out = run({ sound: 1.3, noise: (b, r) => addHiss(b, 0.002, r) }, 4242);
     line("sound and picture from different drips", out);
-    expect(out.fused.confidence).toBe("low");
-    expect(out.fused.reason).toMatch(/match|rhythm|lined up/);
+    // the video shows the leak being measured; the sound may be another tap or another take
+    expect(out.fused.fused.chose).toBe("picture");
+    expect(out.fused.confidence).toBe("medium");
+    expect(Math.abs(out.fused.dropsPerMin! - out.trueRate!) / out.trueRate!).toBeLessThan(0.03);
+  });
+
+  it("a video without sound: the picture alone, as sure as it is", () => {
+    const out = run({ sound: "none" }, 515);
+    const f = fuse([], [], DURATION * 1000, { picture: out.pictureAlone, noSound: true });
+    report.push(`no sound: picture alone ${fmt(out.pictureAlone)} -> combined ${fmt(f)}`);
+    expect(f.confidence).toBe(out.pictureAlone.confidence);
+    expect(Math.abs(f.dropsPerMin! - out.trueRate!) / out.trueRate!).toBeLessThan(0.03);
   });
 
   it("no drips at all: talking, bugs and a hand", () => {

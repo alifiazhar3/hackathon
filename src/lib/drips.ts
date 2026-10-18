@@ -15,6 +15,10 @@ export type Measurement = {
   intervalMs: number | null;
   confidence: Confidence;
   reason: string | null;
+  /** only a few slow drops were seen, so the rate is a rough estimate */
+  rough?: boolean;
+  /** the rate came from the rhythm of the picture rather than counting drops one by one */
+  byRhythm?: boolean;
   /** set when the leak is a steady stream, measured by timing how long it takes to fill a container */
   stream?: { containerMl: number; seconds: number; mlPerMin: number };
 };

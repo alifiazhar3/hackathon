@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
 import type { Measurement } from "@/lib/drips";
 import { lengthProblem, ensureDuration, MAX_SECONDS, MIN_SECONDS } from "@/lib/recorder";
 import { analyzePicture, analyzeSound, combine, type RecordingResult } from "@/lib/recording";
@@ -11,6 +11,10 @@ export type Recorded = { blob: Blob; column: number; seconds: number };
 
 const PRIMARY = "rounded-full border-[3px] border-water-deep bg-water-deep px-5 py-2 text-sm font-medium text-white hover:bg-water-ink";
 const SECONDARY = "rounded-full border-[3px] border-water-deep bg-white px-5 py-2 text-sm font-medium text-water-deep hover:bg-sky";
+/** phones label videos inconsistently, so name the common kinds as well */
+const VIDEO_TYPES = "video/*,.mp4,.mov,.m4v,.webm,.3gp";
+/** give up on a video the browser can't open after this long */
+const LOAD_TIMEOUT_MS = 20_000;
 
 const usable = (m: Measurement | null | undefined): m is Measurement => !!m && m.dropsPerMin !== null && m.confidence !== "low";
 
@@ -42,6 +46,8 @@ export function RecordingTester({
   const [progress, setProgress] = useState(0);
   const [step, setStep] = useState("");
   const [result, setResult] = useState<RecordingResult>({ sound: null, picture: null, combined: null });
+  /** loading has finished (or failed), so later events from the same video are ignored */
+  const loaded = useRef(false);
 
   useEffect(
     () => () => {
@@ -50,9 +56,25 @@ export function RecordingTester({
     [url],
   );
 
-  function choose(f: File | undefined) {
+  // a video the browser can't open may never say so: don't wait forever
+  useEffect(() => {
+    if (phase !== "loading") return;
+    const timer = window.setTimeout(() => {
+      if (loaded.current) return;
+      loaded.current = true;
+      setProblem("this video couldn't be opened in this browser");
+      setPhase("done");
+    }, LOAD_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [phase, url]);
+
+  function choose(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    // clear the picker, so choosing the same file again still counts as a choice
+    e.target.value = "";
     if (!f) return;
     if (url) URL.revokeObjectURL(url);
+    loaded.current = false;
     setFile(f);
     setUrl(URL.createObjectURL(f));
     setResult({ sound: null, picture: null, combined: null });
@@ -60,31 +82,38 @@ export function RecordingTester({
     setPhase("loading");
   }
 
-  async function check(col: number | null, length: number) {
+  async function check(col: number, length: number) {
     if (!file) return;
     setPhase("checking");
-    setStep("checking the sound…");
     setProgress(0);
-    const sound = await analyzeSound(file);
-    let picture: RecordingResult["picture"] = null;
-    if (col !== null && videoRef.current) {
-      setStep("checking the picture, frame by frame…");
-      picture = await analyzePicture(videoRef.current, col, setProgress, length);
-    }
-    const combined = combine(sound, picture, length * 1000);
-    setResult({ sound, picture, combined });
+    try {
+      setStep("listening to the sound…");
+      const sound = await analyzeSound(file);
+      const v = videoRef.current;
+      let picture: RecordingResult["picture"] = null;
+      if (v && v.videoWidth) {
+        setStep("watching the video for drops…");
+        picture = await analyzePicture(v, col, setProgress, length);
+      }
+      const combined = combine(sound, picture, length * 1000);
+      setResult({ sound, picture, combined });
+      if (picture) setColumn(picture.column);
 
-    // camera and mic together give one answer, which goes straight to the results
-    if (combined?.stream.stream) return onStream(combined.stream.note);
-    if (usable(combined?.measurement)) return onUse(combined.measurement);
+      // camera and mic together give one answer, which goes straight to the results
+      if (combined?.stream.stream) return onStream(combined.stream.note);
+      if (usable(combined?.measurement)) return onUse(combined.measurement);
+    } catch (e) {
+      setProblem(`something went wrong while checking the video (${e instanceof Error ? e.message.toLowerCase() : "unknown error"})`);
+    }
     setPhase("done");
   }
 
   async function onLoaded() {
     const v = videoRef.current;
-    if (!v) return;
+    if (!v || loaded.current) return;
+    loaded.current = true;
     const known = await ensureDuration(v);
-    const length = Number.isFinite(known) ? known : (recorded?.seconds ?? NaN);
+    const length = Number.isFinite(known) && known > 0 ? known : (recorded?.seconds ?? NaN);
     setSeconds(length);
     const issue = lengthProblem(length, recorded ? "recording" : "video");
     if (issue) {
@@ -93,9 +122,17 @@ export function RecordingTester({
       return;
     }
     if (recorded) return void check(recorded.column, length);
-    if (!v.videoWidth) return void check(null, length); // audio only: nothing to aim at
-    v.currentTime = 0.05;
+    // nothing to aim at (a sound-only file): go straight to listening
+    if (!v.videoWidth) return void check(0.5, length);
+    v.currentTime = Math.min(1, length / 2);
     setPhase("aim");
+  }
+
+  function onVideoError() {
+    if (loaded.current) return;
+    loaded.current = true;
+    setProblem("this video couldn't be opened in this browser");
+    setPhase("done");
   }
 
   function aimAt(e: MouseEvent<HTMLDivElement>) {
@@ -106,21 +143,30 @@ export function RecordingTester({
     void check(x, seconds);
   }
 
-  const { picture, combined } = result;
+  const picker = (label: string, style: string) => (
+    <label className={`cursor-pointer ${style}`}>
+      {label}
+      <input type="file" accept={VIDEO_TYPES} className="sr-only" onChange={choose} />
+    </label>
+  );
+
+  const { sound, picture, combined } = result;
+  const reason = problem
+    ? problem
+    : !picture && !sound
+      ? "drippy couldn't read any picture or sound from it"
+      : (combined?.measurement?.reason ?? "no steady drip was found");
 
   return (
     <div>
       {phase === "pick" && (
         <>
           <p className="text-sm text-water-ink/80">
-            pick a {MIN_SECONDS}–{MAX_SECONDS} second video of the drip, filmed with sound. drippy checks every frame and
-            every sound, then combines them.
+            pick a {MIN_SECONDS}–{MAX_SECONDS} second video of the leak. drippy watches every frame (and listens, if it has
+            sound), then works out how fast it drips, or whether it's a stream.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
-            <label className={`cursor-pointer ${PRIMARY}`}>
-              choose a video
-              <input type="file" accept="video/*" className="hidden" onChange={(e) => choose(e.target.files?.[0])} />
-            </label>
+            {picker("choose a video", PRIMARY)}
             <button type="button" onClick={onCancel} className={SECONDARY}>
               cancel
             </button>
@@ -140,10 +186,7 @@ export function RecordingTester({
             <button type="button" onClick={onRecord} className={PRIMARY}>
               record {MIN_SECONDS}–{MAX_SECONDS} s
             </button>
-            <label className={`cursor-pointer ${SECONDARY}`}>
-              upload another video
-              <input type="file" accept="video/*" className="hidden" onChange={(e) => choose(e.target.files?.[0])} />
-            </label>
+            {picker("upload another video", SECONDARY)}
             <button type="button" onClick={onCancel} className={SECONDARY}>
               cancel
             </button>
@@ -156,14 +199,25 @@ export function RecordingTester({
           className={
             phase === "aim" || phase === "checking"
               ? `relative mb-3 overflow-hidden rounded-2xl border-[3px] border-water-deep ${phase === "aim" ? "cursor-crosshair" : ""}`
-              : "hidden"
+              : // kept on the page (not display: none) so every browser loads it
+                "pointer-events-none absolute h-px w-px overflow-hidden opacity-0"
           }
           onClick={aimAt}
         >
-          <video ref={videoRef} src={url} muted playsInline preload="auto" onLoadedData={() => void onLoaded()} className="block h-auto w-full bg-sky" />
+          <video
+            key={url}
+            ref={videoRef}
+            src={url}
+            muted
+            playsInline
+            preload="auto"
+            onLoadedMetadata={() => void onLoaded()}
+            onError={onVideoError}
+            className="block h-auto w-full bg-sky"
+          />
           {phase === "aim" ? (
             <div className="absolute inset-x-0 top-0 bg-white/90 p-2 text-center text-sm font-medium text-water-deep">
-              tap the picture where the drops fall
+              tap the picture where the water falls
             </div>
           ) : (
             <div
@@ -194,23 +248,17 @@ export function RecordingTester({
       {phase === "done" && (
         <div className="rounded-2xl border-[3px] border-coral bg-coral-light p-4">
           <p className="text-sm font-semibold text-coral-deep">couldn't measure the drip from this {recorded ? "recording" : "video"}.</p>
-          <p className="mt-1 text-sm">
-            {!picture
-              ? "it needs a video with sound, so the camera and the mic can check each other."
-              : (combined?.measurement?.reason ?? "the camera and the mic didn't find the same steady drip") + "."}
-          </p>
+          <p className="mt-1 text-sm">{reason}.</p>
           <p className="mt-2 text-xs text-water-deep">
-            tips: prop the phone up so it doesn't move, keep the falling drops in view and tap right where they fall, get close
-            enough to hear them land, and keep the room quiet.
+            tips: prop the phone up so it doesn't move, keep the falling drops in view and tap right where they fall, and film
+            for the full {MAX_SECONDS} seconds if the drip is slow. if the browser can't open the video, try an mp4, or record
+            in drippy instead.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
             <button type="button" onClick={onRecord} className={PRIMARY}>
               record again
             </button>
-            <label className={`cursor-pointer ${SECONDARY}`}>
-              upload another video
-              <input type="file" accept="video/*" className="hidden" onChange={(e) => choose(e.target.files?.[0])} />
-            </label>
+            {picker("upload another video", SECONDARY)}
             <button type="button" onClick={onCancel} className={SECONDARY}>
               cancel
             </button>
